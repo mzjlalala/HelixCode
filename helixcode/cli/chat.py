@@ -1,46 +1,55 @@
-"""HelixCode 交互式对话模式 — 类似 Claude Code 的 REPL 体验。
+"""HelixCode 交互式对话模式 — 流式输出，类似 Claude Code。
 
-输入 helix 即可进入对话，AI 自动识别意图、分析代码、流式输出思考过程。
+输入 helix 进入对话，一个 LLM 请求流式输出，自动智能响应。
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
+import re
 import sys
 from pathlib import Path
-from typing import Any
 
 from rich.console import Console
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.spinner import Spinner
 
-from helixcode.agent.context import AgentContext
-from helixcode.agent.orchestrator import AgentOrchestrator
 from helixcode.config import Settings
 from helixcode.core.interfaces.llm import ChatProvider
 from helixcode.memory.session import InMemorySession
 
 console = Console()
 
-# 意图识别的系统提示 — 用最少的 token 判断用户想干什么
-INTENT_PROMPT = """分析用户输入，判断意图，返回 JSON:
-{"intent": "explain|fix|search|plan|review|chat", "target": "目标", "query": "完整查询"}
 
-- explain: 分析代码结构、调用链
-- fix: 修复 bug
-- search: 搜索代码
-- plan: 制定执行计划
-- review: 审查代码变更
-- chat: 一般对话
+# 核心系统提示词 — 让 LLM 自动判断用户意图并做对应处理
+SYSTEM_PROMPT = """你是 HelixCode，一个专业的 AI 代码助手。你可以：
 
-只返回 JSON，不要其他内容。"""
+- 📖 分析代码：解释代码结构、调用链、依赖关系
+- 🔧 修复问题：找到 bug 并给出修复方案
+- 🔍 搜索代码：在项目中查找相关文件和符号
+- 📋 制定计划：将复杂任务拆解为可执行的步骤
+- ✅ 审查代码：发现代码中的问题和改进点
+- 💬 一般对话：回答技术问题
+
+## 工作规则
+
+1. 如果用户提到具体的**类名、文件名、方法名**，先尝试在项目中查找相关代码文件，然后分析
+2. 如果用户让你**修复 bug**，先分析原因，再给出具体 diff
+3. 如果用户让你**审查代码**，按严重级别（CRITICAL/WARNING/SUGGESTION）列出问题
+4. 如果用户问**一般的编程问题**，直接回答
+5. 每次回复后，询问用户是否需要进一步帮助
+
+## 回复格式
+
+- 用 Markdown 格式，关键内容用粗体
+- 代码块用 ``` 包裹并标注语言
+- 涉及文件路径时用 ` 包裹
+- 用中文回复，代码和术语保持英文
+- 简洁直接，不要啰嗦
+"""
 
 
 class HelixChat:
-    """HelixCode 交互式对话引擎。"""
+    """HelixCode 交互式对话引擎 — 单次 LLM 调用，流式输出。"""
 
     def __init__(
         self,
@@ -52,34 +61,6 @@ class HelixChat:
         self._settings = settings
         self._project_root = project_root
         self._session = InMemorySession()
-        self._orchestrator: AgentOrchestrator | None = None
-
-    async def _init_orchestrator(self) -> AgentOrchestrator:
-        """延迟初始化编排器，只在需要执行任务时创建。"""
-        if self._orchestrator is None:
-            from helixcode.cli.bootstrap import create_orchestrator
-            self._orchestrator = await create_orchestrator(
-                self._settings, str(self._project_root)
-            )
-        return self._orchestrator
-
-    async def _detect_intent(self, user_input: str) -> dict[str, str]:
-        """用 LLM 快速判断用户意图。"""
-        try:
-            response = await self._chat.chat(
-                [{'role': 'user', 'content': user_input}],
-                system=INTENT_PROMPT,
-                temperature=0,
-                max_tokens=100,
-            )
-            # 提取 JSON
-            response = response.strip()
-            if response.startswith('```'):
-                response = response.split('\n', 1)[1].rsplit('\n', 1)[0]
-            return json.loads(response)
-        except Exception:
-            # 意图识别失败，默认为 chat
-            return {'intent': 'chat', 'target': '', 'query': user_input}
 
     async def run(self) -> None:
         """启动交互式对话循环。"""
@@ -95,84 +76,121 @@ class HelixChat:
             if not user_input:
                 continue
 
-            # 处理内置命令
+            # 内置命令
             if user_input.startswith('/'):
-                await self._handle_command(user_input)
+                self._handle_command(user_input)
                 continue
 
-            # 处理用户消息
-            await self._handle_message(user_input)
+            # 处理消息
+            await self._respond(user_input)
 
-    async def _handle_message(self, user_input: str) -> None:
-        """处理用户输入 — 意图识别 → 执行 → 展示结果。"""
-        # 1. 意图识别
-        with console.status('[dim]正在理解你的意图...[/]'):
-            intent = await self._detect_intent(user_input)
+    async def _respond(self, user_input: str) -> None:
+        """流式响应用户输入。
 
-        intent_type = intent.get('intent', 'chat')
-        query = intent.get('query', user_input)
-
-        console.print(f'  [dim]🎯 识别意图: {intent_type}[/]')
-
-        # 2. 根据意图执行
-        if intent_type == 'chat':
-            await self._handle_chat(user_input)
-        else:
-            await self._handle_task(intent_type, query)
-
-    async def _handle_chat(self, user_input: str) -> None:
-        """一般对话 — 流式输出 LLM 回复。"""
+        流程：查找相关代码 → 构建上下文 → 流式输出 LLM 回复。
+        """
         self._session.add_message('user', user_input)
-        console.print('\n[bold green]Helix:[/]')
 
-        # 构建消息列表，包含历史
+        # 1. 从用户输入中提取可能的目标文件/类名，读取并附加上下文
+        code_context = self._gather_context(user_input)
+        if code_context:
+            console.print(f'  [dim]📄 已加载 {len(code_context)} 个相关文件[/]')
+
+        # 2. 构建完整上下文
+        enhanced_input = user_input
+        if code_context:
+            enhanced_input = (
+                f'{user_input}\n\n'
+                f'--- 相关文件内容 ---\n\n'
+                f'{code_context}\n\n'
+                f'--- 请基于以上文件内容回答 ---'
+            )
+
+        # 3. 流式输出
+        console.print()
+        console.print('[bold green]Helix:[/] ')
+
         history = self._session.get_conversation()
+        full_response = ''
 
         try:
             stream = self._chat.chat_stream(
-                history[:-1],  # 历史消息
-                system=CHAT_SYSTEM_PROMPT,
+                # 传历史记录（不含最后一条，因为刚加的）
+                history[:-1] if len(history) > 1 else [],
+                system=SYSTEM_PROMPT + f'\n\n当前项目: {self._project_root}',
             )
 
-            full_response = ''
+            # 流式输出，token 级别的实时展示
             async for token in stream:
                 console.print(token, end='')
                 full_response += token
 
-            console.print()  # 换行
+            console.print()
             self._session.add_message('assistant', full_response)
 
         except Exception as exc:
             console.print(f'\n[red]错误: {exc}[/]')
 
-    async def _handle_task(self, intent: str, query: str) -> None:
-        """执行具体任务（explain/fix/search/plan/review）。"""
-        self._session.add_message('user', query)
+    def _gather_context(self, user_input: str) -> str | None:
+        """从用户输入中提取目标，查找文件并读取内容作为上下文。
 
-        console.print(f'\n[bold green]Helix[/] [dim]({intent})[/]:')
+        识别模式:
+        - 类名: 大写开头的驼峰命名 (如 GitLabWebhookController)
+        - 文件名: 包含扩展名 (如 BugDemo.java, main.py)
+        - 路径: 包含 / (如 src/main/java/...)
+        """
+        # 提取可能的类名
+        class_names = re.findall(r'\b([A-Z][a-zA-Z0-9]{2,})\b', user_input)
 
-        try:
-            orch = await self._init_orchestrator()
-            result = await orch.run(query, command=intent)
+        # 提取可能的文件名
+        file_names = re.findall(r'([\w./-]+\.(java|py|js|ts|go|rs|cpp|c|h))', user_input)
+        file_names = [f[0] for f in file_names]
 
-            # 展示结果
-            if result.get('errors'):
-                for err in result['errors']:
-                    console.print(f'  [red]✗ {err}[/]')
+        # 合并候选
+        candidates = set()
+        candidates.update(class_names)
+        candidates.update(file_names)
 
-            final = result.get('final_result', '')
-            if final:
-                console.print(Markdown(final))
+        if not candidates:
+            return None
 
-            self._session.add_message('assistant', final or '任务完成')
+        # 查找并读取文件
+        loaded = []
+        for name in candidates:
+            # 跳过太短的名字
+            if len(name) < 3:
+                continue
 
-        except Exception as exc:
-            console.print(f'\n[red]执行失败: {exc}[/]')
+            # 搜索文件
+            for pattern in [
+                f'**/{name}.java',
+                f'**/{name}.py',
+                f'**/{name}.js',
+                f'**/{name}.ts',
+                f'**/{name}',
+                f'**/{name}.*',
+            ]:
+                matches = list(self._project_root.glob(pattern))
+                if matches:
+                    for match in matches[:3]:  # 最多 3 个匹配
+                        try:
+                            content = match.read_text(encoding='utf-8', errors='replace')
+                            # 裁剪大文件
+                            if len(content) > 5000:
+                                content = content[:5000] + '\n... (文件过长已截断)'
+                            loaded.append(
+                                f'### 文件: {match.relative_to(self._project_root)}\n'
+                                f'```\n{content}\n```'
+                            )
+                        except Exception:
+                            pass
+                    break  # 找到匹配就跳出
 
-    async def _handle_command(self, cmd: str) -> None:
-        """处理斜杠命令。"""
-        parts = cmd.split()
-        action = parts[0].lower()
+        return '\n\n'.join(loaded) if loaded else None
+
+    def _handle_command(self, cmd: str) -> None:
+        """处理内置命令。"""
+        action = cmd.split()[0].lower()
 
         if action == '/help':
             console.print("""
@@ -180,11 +198,15 @@ class HelixChat:
   [cyan]/help[/]     - 显示帮助
   [cyan]/clear[/]    - 清空对话历史
   [cyan]/quit[/]     - 退出
-  [cyan]/explain[/]  - 分析代码
-  [cyan]/fix[/]      - 修复问题
-  [cyan]/search[/]   - 搜索代码
-  [cyan]/plan[/]     - 制定计划
-  [cyan]/review[/]   - 审查变更
+  [cyan]/files[/]    - 重新加载当前项目的文件索引
+
+[bold]使用方式:[/]
+  直接输入你的问题或需求，AI 会自动理解并处理。
+  例如:
+  - "分析 GitLabWebhookController 的逻辑"
+  - "帮我修一下这个 NPE"
+  - "审查最近的改动"
+  - "怎么用 CompletableFuture？"
             """)
         elif action == '/clear':
             self._session.clear()
@@ -192,12 +214,11 @@ class HelixChat:
         elif action in ('/quit', '/exit', '/q'):
             console.print('[dim]再见！[/]')
             sys.exit(0)
-        elif action in ('/explain', '/fix', '/search', '/plan', '/review'):
-            target = ' '.join(parts[1:])
-            if target:
-                await self._handle_task(action[1:], target)
-            else:
-                console.print('[yellow]请指定目标，如: /explain OrderService[/]')
+        elif action == '/files':
+            console.print('[dim]正在扫描项目文件...[/]')
+            py_files = list(self._project_root.glob('**/*.py'))
+            java_files = list(self._project_root.glob('**/*.java'))
+            console.print(f'  找到 {len(py_files)} 个 .py 文件, {len(java_files)} 个 .java 文件')
         else:
             console.print(f'[yellow]未知命令: {action}，输入 /help 查看帮助[/]')
 
@@ -206,28 +227,8 @@ class HelixChat:
         console.print()
         console.print(Panel(
             '[bold cyan]🧬 HelixCode[/] — AI 代码助手\n\n'
-            '我能帮你分析代码、修复 bug、搜索代码库、制定计划。\n'
-            '直接输入你的需求，我会自动理解并执行。\n\n'
-            '[dim]输入 /help 查看帮助，/quit 退出[/]',
+            '我能帮你分析代码、修复 bug、制定计划、审查变更。\n'
+            '直接输入需求，我会自动查找相关文件并流式回复。\n\n'
+            '[dim]/help 帮助 | /quit 退出[/]',
             border_style='cyan',
         ))
-
-
-# 对话模式的系统提示词
-CHAT_SYSTEM_PROMPT = """你是 HelixCode，一个 AI 代码助手。你可以帮助用户:
-
-- 📖 分析和解释代码
-- 🔧 查找和修复 bug
-- 🔍 搜索代码库
-- 📋 制定开发计划
-- ✅ 审查代码变更
-
-你可以访问用户的文件系统、git 仓库和代码索引。
-当用户需要帮助时，先理解他们的需求，再给出具体可操作的方案。
-
-回复风格:
-- 简洁直接，不要啰嗦
-- 涉及到代码的，给出具体文件路径和行号
-- 用中文回复，代码和术语保持英文
-- 如果问到超出能力范围的事情，诚实说明
-"""
