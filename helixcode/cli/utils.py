@@ -38,8 +38,8 @@ def validate_api_key(settings: Settings) -> None:
     if not settings.llm.api_key:
         print(
             '⚠️  未设置 API Key。\n'
-            '请设置环境变量 HELIX_MODEL_API_KEY，或创建 .env 文件：\n'
-            '  echo HELIX_MODEL_API_KEY=sk-xxx > .env\n'
+            '请设置环境变量 HELIX_API_KEY，或创建 .env 文件：\n'
+            '  echo HELIX_API_KEY=sk-xxx > .env\n'
             '\n'
             '支持的 API 提供商（兼容 OpenAI 协议）:\n'
             '  - OpenAI: https://api.openai.com/v1\n'
@@ -47,5 +47,5 @@ def validate_api_key(settings: Settings) -> None:
             '  - GLM (智谱): https://open.bigmodel.cn/api/paas/v4\n'
             '  - Kimi (月之暗面): https://api.moonshot.cn/v1\n'
             '\n'
-            '通过 HELIX_MODEL_BASE_URL 设置 API 地址。'
+            '通过 HELIX_BASE_URL 设置 API 地址。'
         )
