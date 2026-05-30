@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { pathToFileURL } from 'node:url';
 import { handleSlashCommand } from '../src/cli/slash-commands.js';
-import { isMainModule } from '../src/cli/main.js';
+import { formatMissingApiKeyMessage, isMainModule } from '../src/cli/main.js';
 
 describe('slash commands', () => {
   it('renders help', () => {
@@ -59,5 +59,15 @@ describe('CLI entry detection', () => {
     const file = 'D:/Code/HelixCode/dist/main.js';
 
     expect(isMainModule(pathToFileURL(file).href, file)).toBe(true);
+  });
+});
+
+describe('CLI configuration guidance', () => {
+  it('renders setup guidance when the API key is missing', () => {
+    const message = formatMissingApiKeyMessage();
+
+    expect(message).toContain('HELIX_API_KEY is not set');
+    expect(message).toContain('$env:HELIX_API_KEY');
+    expect(message).toContain('OPENAI_API_KEY');
   });
 });

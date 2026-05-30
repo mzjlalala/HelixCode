@@ -24,6 +24,12 @@ program
 
 export async function runRepl(cwd: string): Promise<void> {
   const config = loadConfig({ cwd });
+  if (!config.apiKey.trim()) {
+    output.write(`${formatMissingApiKeyMessage()}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
   const provider = new OpenAIChatProvider(config);
   const agent = new TerminalAgent({ cwd: config.cwd, provider });
 
@@ -129,6 +135,15 @@ async function handleAgentResult(
 function formatConfirmedToolResult(result: ConfirmedToolResult): string {
   if (!result.ok) return `Result: failed\n${result.error}`;
   return ['Result: ok', result.output].filter(Boolean).join('\n');
+}
+
+export function formatMissingApiKeyMessage(): string {
+  return [
+    'HELIX_API_KEY is not set. Set HELIX_API_KEY to enable HelixCode agent reasoning.',
+    'PowerShell example:',
+    '$env:HELIX_API_KEY="your-api-key"',
+    'OPENAI_API_KEY is also accepted as a fallback.'
+  ].join('\n');
 }
 
 async function readAllStdin(): Promise<string> {

@@ -6,9 +6,14 @@
   "bin": {
     "helix": "./dist/main.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "dev": "tsx src/cli/main.ts",
     "build": "tsup src/cli/main.ts --format esm --clean --out-dir dist",
+    "prepack": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
@@ -16,15 +21,15 @@
     "node": ">=20"
   },
   "dependencies": {
-    "commander": "*",
-    "dotenv": "*",
-    "openai": "*"
+    "commander": "^15.0.0",
+    "dotenv": "^17.4.2",
+    "openai": "^6.39.1"
   },
   "devDependencies": {
-    "@types/node": "*",
-    "tsup": "*",
-    "tsx": "*",
-    "typescript": "*",
-    "vitest": "*"
+    "@types/node": "^25.9.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   }
 }

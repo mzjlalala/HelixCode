@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { readFileTool, searchFilesTool, writeFileTool } from '../src/tools/filesystem.js';
 import { applyPatchTool } from '../src/tools/patch.js';
-import { classifyShellCommand } from '../src/tools/shell.js';
+import { classifyShellCommand, runShellCommand } from '../src/tools/shell.js';
 
 async function makeProject(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'helixcode-'));
@@ -104,6 +104,29 @@ describe('shell safety', () => {
   it('blocks destructive commands', () => {
     expect(classifyShellCommand('git reset --hard').risk).toBe('blocked');
     expect(classifyShellCommand('rm -rf .').risk).toBe('blocked');
+  });
+
+  it('rejects empty shell commands', async () => {
+    const cwd = await makeProject();
+
+    const result = await runShellCommand(cwd, '   ');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/non-empty command/i);
+  });
+
+  it('reports non-zero shell exit codes as failures', async () => {
+    const cwd = await makeProject();
+    const command = `"${process.execPath}" -e "console.log('shell out'); console.error('shell err'); process.exit(3)"`;
+
+    const result = await runShellCommand(cwd, command);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('exit code 3');
+      expect(result.error).toContain('shell out');
+      expect(result.error).toContain('shell err');
+    }
   });
 
   it('requires confirmation for ordinary commands', () => {

@@ -85,7 +85,7 @@ export class TerminalAgent {
       turnMessages.push({ role: 'assistant', content: response });
 
       if (request.tool === 'run_shell') {
-        const command = String(request.args?.command ?? '');
+        const command = String(request.args?.command ?? '').trim();
         const risk = classifyShellCommand(command);
         if (risk.risk === 'blocked') {
           turnMessages.push({

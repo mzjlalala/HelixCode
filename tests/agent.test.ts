@@ -53,6 +53,19 @@ describe('TerminalAgent', () => {
     }
   });
 
+  it('rejects empty shell commands without confirmation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({ tool: 'run_shell', args: { command: '   ' } })
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const result = await agent.run('run a command');
+
+    expect(result.type).toBe('final');
+    if (result.type === 'final') expect(result.message).toMatch(/non-empty command/i);
+  });
+
   it('asks for confirmation before writing files and can execute the confirmed write', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
     const provider = new ScriptedProvider([

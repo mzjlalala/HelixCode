@@ -23,6 +23,7 @@ $env:HELIX_CHAT_MODEL="gpt-4o"
 
 ```powershell
 npm install
+npm run dev -- --cwd .
 npm test
 npm run typecheck
 npm run build
@@ -33,6 +34,16 @@ npm run build
 ```powershell
 helix
 ```
+
+For local development without installing the CLI globally:
+
+```powershell
+npm run dev -- --cwd .
+```
+
+If neither `HELIX_API_KEY` nor `OPENAI_API_KEY` is set, HelixCode exits before
+starting the REPL and prints a short setup hint. `helix --help` still works
+without an API key.
 
 Useful slash commands:
 
@@ -50,6 +61,10 @@ Useful slash commands:
 
 HelixCode can read and search files directly. It asks for confirmation before writing files, applying patches, or running shell commands. Before confirmation, it prints a readable preview that includes the target file, patch files, or shell command. Destructive shell commands such as `git reset --hard` and `rm -rf` are blocked.
 
+Shell commands must be non-empty. A command that exits with a non-zero status is
+reported as a failed action with its captured output, so the agent can continue
+from the actual command result.
+
 ## Current Agent Tools
 
 - `read_file`
@@ -66,3 +81,17 @@ The REPL keeps short session context, so the agent can use prior tool observatio
 Use `/reset` to clear session context without clearing the screen, `/clear` to clear both, and `/history` to inspect the current context size.
 
 Tool requests are parsed from strict JSON, fenced JSON code blocks, or a balanced JSON object embedded in a short assistant response.
+
+## Validation
+
+Before relying on a local build, run:
+
+```powershell
+npm run typecheck
+npm test
+npm run build
+npx tsx src\cli\main.ts --help
+```
+
+The npm package includes the built `dist` directory, so run `npm run build`
+before packing or installing from this checkout.

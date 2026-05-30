@@ -9,6 +9,10 @@ export interface ShellRisk {
 }
 
 export function classifyShellCommand(command: string): ShellRisk {
+  if (!command.trim()) {
+    return { risk: 'blocked', reason: 'run_shell requires a non-empty command.' };
+  }
+
   const destructivePatterns = [
     /\brm\s+-rf\b/i,
     /\bgit\s+reset\s+--hard\b/i,
@@ -40,11 +44,23 @@ export async function runShellCommand(
     return { ok: true, stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string; code?: number; message?: string };
-    return {
-      ok: true,
-      stdout: err.stdout ?? '',
-      stderr: err.stderr ?? err.message ?? '',
-      exitCode: typeof err.code === 'number' ? err.code : 1
-    };
+    return { ok: false, error: formatShellFailure(err) };
   }
+}
+
+function formatShellFailure(error: {
+  stdout?: string;
+  stderr?: string;
+  code?: number;
+  message?: string;
+}): string {
+  const exitCode = typeof error.code === 'number' ? error.code : 1;
+  const lines = [`Command exited with exit code ${exitCode}.`];
+  if (error.stdout) lines.push(`stdout:\n${error.stdout.trimEnd()}`);
+  if (error.stderr) {
+    lines.push(`stderr:\n${error.stderr.trimEnd()}`);
+  } else if (error.message) {
+    lines.push(`stderr:\n${error.message}`);
+  }
+  return lines.join('\n');
 }
