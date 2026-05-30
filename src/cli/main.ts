@@ -8,7 +8,8 @@ import { loadConfig } from '../core/config.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { handleSlashCommand } from './slash-commands.js';
-import { executeConfirmedTool } from '../agent/confirmed-action.js';
+import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
+import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
 
 const program = new Command();
 
@@ -40,9 +41,21 @@ export async function runRepl(cwd: string): Promise<void> {
   }
 
   const rl = createInterface({ input, output });
+  let closing = false;
+  rl.on('SIGINT', () => {
+    closing = true;
+    output.write('\nGoodbye.\n');
+    rl.close();
+  });
 
-  while (true) {
-    const line = (await rl.question('helix> ')).trim();
+  while (!closing) {
+    let line: string;
+    try {
+      line = (await rl.question('helix> ')).trim();
+    } catch {
+      if (!closing) output.write('\nGoodbye.\n');
+      break;
+    }
     if (!line) continue;
     if (await handleInputLine(line, { agent, config, rl })) break;
   }
@@ -65,8 +78,10 @@ async function handleInputLine(
   });
   if (slash.handled) {
     output.write(`${slash.output}\n`);
-    if (slash.clear) {
+    if (slash.clear || slash.reset) {
       context.agent.clearHistory();
+    }
+    if (slash.clear) {
       console.clear();
     }
     return slash.exit;
@@ -90,6 +105,9 @@ async function handleAgentResult(
     return;
   }
 
+  const preview = await previewConfirmedTool(context.config.cwd, result);
+  output.write(`${preview}\n`);
+
   if (!context.rl) {
     output.write(`${result.summary}? [y/N] Command skipped in non-interactive mode.\n`);
     context.agent.recordSkippedConfirmation(result);
@@ -99,13 +117,18 @@ async function handleAgentResult(
   const answer = (await context.rl.question(`${result.summary}? [y/N] `)).trim().toLowerCase();
   if (answer === 'y' || answer === 'yes') {
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
-    output.write(`${JSON.stringify(commandResult, null, 2)}\n`);
+    output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
     await handleAgentResult(followUp, context);
   } else {
     context.agent.recordSkippedConfirmation(result);
     output.write('Command skipped.\n');
   }
+}
+
+function formatConfirmedToolResult(result: ConfirmedToolResult): string {
+  if (!result.ok) return `Result: failed\n${result.error}`;
+  return ['Result: ok', result.output].filter(Boolean).join('\n');
 }
 
 async function readAllStdin(): Promise<string> {

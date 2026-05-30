@@ -39,14 +39,16 @@ Useful slash commands:
 ```text
 /help
 /status
+/history
 /tools
+/reset
 /clear
 /exit
 ```
 
 ## Safety
 
-HelixCode can read and search files directly. It asks for confirmation before writing files, applying patches, or running shell commands. Destructive shell commands such as `git reset --hard` and `rm -rf` are blocked.
+HelixCode can read and search files directly. It asks for confirmation before writing files, applying patches, or running shell commands. Before confirmation, it prints a readable preview that includes the target file, patch files, or shell command. Destructive shell commands such as `git reset --hard` and `rm -rf` are blocked.
 
 ## Current Agent Tools
 
@@ -60,3 +62,5 @@ HelixCode can read and search files directly. It asks for confirmation before wr
 - `run_shell`
 
 The REPL keeps short session context, so the agent can use prior tool observations and confirmed action results while the process is running.
+
+Use `/reset` to clear session context without clearing the screen, `/clear` to clear both, and `/history` to inspect the current context size.

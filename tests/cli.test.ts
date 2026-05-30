@@ -8,7 +8,11 @@ describe('slash commands', () => {
     const result = handleSlashCommand('/help');
 
     expect(result.handled).toBe(true);
-    if (result.handled) expect(result.output).toContain('HelixCode');
+    if (result.handled) {
+      expect(result.output).toContain('HelixCode');
+      expect(result.output).toContain('/reset');
+      expect(result.output).toContain('/history');
+    }
   });
 
   it('recognizes exit commands', () => {
@@ -28,6 +32,24 @@ describe('slash commands', () => {
     if (result.handled) {
       expect(result.output).toContain('D:/Code/HelixCode');
       expect(result.output).toContain('gpt-test');
+    }
+  });
+
+  it('renders history count from context', () => {
+    const result = handleSlashCommand('/history', { historyMessages: 7 });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) expect(result.output).toBe('Session history messages: 7');
+  });
+
+  it('recognizes reset as a context-clearing command without clearing the screen', () => {
+    const result = handleSlashCommand('/reset');
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.clear).toBe(false);
+      expect(result.reset).toBe(true);
+      expect(result.output).toBe('Session context reset.');
     }
   });
 });

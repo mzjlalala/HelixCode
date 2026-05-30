@@ -1,5 +1,5 @@
 export type SlashCommandResult =
-  | { handled: true; output: string; exit: boolean; clear: boolean }
+  | { handled: true; output: string; exit: boolean; clear: boolean; reset?: boolean }
   | { handled: false };
 
 export interface SlashCommandContext {
@@ -25,7 +25,9 @@ export function handleSlashCommand(
         'HelixCode commands:',
         '/help    Show this help',
         '/status  Show current project, model, and session state',
+        '/history Show current session history size',
         '/tools   Show available agent tools',
+        '/reset   Clear session context',
         '/clear   Clear the screen and session context',
         '/exit    Exit HelixCode'
       ].join('\n')
@@ -34,6 +36,16 @@ export function handleSlashCommand(
 
   if (command === '/clear') {
     return { handled: true, exit: false, clear: true, output: 'Session cleared.' };
+  }
+
+  if (command === '/reset') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      reset: true,
+      output: 'Session context reset.'
+    };
   }
 
   if (command === '/status') {
@@ -66,6 +78,15 @@ export function handleSlashCommand(
         'apply_patch    Apply a unified diff after confirmation',
         'run_shell      Run a shell command after confirmation'
       ].join('\n')
+    };
+  }
+
+  if (command === '/history') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      output: `Session history messages: ${context.historyMessages ?? 0}`
     };
   }
 
