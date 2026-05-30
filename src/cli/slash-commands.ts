@@ -16,6 +16,7 @@ export interface SlashCommandContext {
   cwd?: string;
   model?: string;
   baseURL?: string;
+  provider?: string;
   apiKeyConfigured?: boolean;
   historyMessages?: number;
   projectInstructions?: string[];

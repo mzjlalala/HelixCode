@@ -52,7 +52,11 @@ npm run build
 
 ```powershell
 helix
+helix "explain this project"`r`nhelix --yes --max-turns 10 "fix the failing tests"
 ```
+
+Passing a prompt runs one non-interactive agent turn and exits. Confirmed actions
+are previewed but skipped in non-interactive mode.
 
 For local development without installing the CLI globally:
 

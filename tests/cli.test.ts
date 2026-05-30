@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { handleSlashCommand } from '../src/cli/slash-commands.js';
-import { createDoctorOutput, formatMissingApiKeyMessage, isMainModule } from '../src/cli/main.js';
+import { createDoctorOutput, formatMissingApiKeyMessage, isMainModule, joinPromptArgs, parseMaxTurns } from '../src/cli/main.js';
 
 describe('slash commands', () => {
   it('renders help', () => {
@@ -120,6 +120,18 @@ describe('slash commands', () => {
   });
 });
 
+describe('one-shot prompt helpers', () => {
+  it('joins prompt arguments into one task', () => {
+    expect(joinPromptArgs(['fix', 'the', 'tests'])).toBe('fix the tests');
+    expect(joinPromptArgs([])).toBe('');
+  });
+
+  it('parses max turns with a safe default', () => {
+    expect(parseMaxTurns('3')).toBe(3);
+    expect(parseMaxTurns('0')).toBe(10);
+    expect(parseMaxTurns(undefined)).toBe(10);
+  });
+});
 describe('CLI entry detection', () => {
   it('recognizes the bundled entry file on Windows-compatible paths', async () => {
     const file = 'D:/Code/HelixCode/dist/main.js';

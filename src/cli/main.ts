@@ -20,26 +20,43 @@ program
   .version('0.1.0')
   .option('-C, --cwd <path>', 'Project directory', process.cwd())
   .option('--doctor', 'Show local HelixCode diagnostics and exit')
-  .action(async (options: { cwd: string; doctor?: boolean }) => {
+  .option('-y, --yes', 'Automatically execute confirmed actions in one-shot mode')
+  .option('--max-turns <number>', 'Maximum one-shot confirmation turns', '10')
+  .argument('[prompt...]', 'Task to run once without starting the REPL')
+  .action(async (promptParts: string[], options: { cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string }) => {
     if (options.doctor) {
       output.write(`${await createDoctorOutput(options.cwd)}\n`);
+      return;
+    }
+    const prompt = joinPromptArgs(promptParts);
+    if (prompt) {
+      await runOnce(options.cwd, prompt, { autoConfirm: options.yes === true, maxTurns: parseMaxTurns(options.maxTurns) });
       return;
     }
     await runRepl(options.cwd);
   });
 
-export async function runRepl(cwd: string): Promise<void> {
-  const config = loadConfig({ cwd });
-  if (!config.apiKey.trim()) {
-    output.write(`${formatMissingApiKeyMessage()}\n`);
-    process.exitCode = 1;
-    return;
-  }
+export async function runOnce(
+  cwd: string,
+  prompt: string,
+  options: { autoConfirm?: boolean; maxTurns?: number } = {}
+): Promise<void> {
+  const context = await createRuntimeContext(cwd);
+  if (!context) return;
+  const result = await context.agent.run(prompt);
+  await handleAgentResult(result, {
+    agent: context.agent,
+    config: context.config,
+    rl: null,
+    autoConfirm: options.autoConfirm === true,
+    remainingTurns: options.maxTurns ?? 10
+  });
+}
 
-  const projectInstructions = await loadProjectInstructions(config.cwd);
-  const runtime = { model: config.model };
-  const provider = new OpenAIChatProvider(config, runtime);
-  const agent = new TerminalAgent({ cwd: config.cwd, provider, projectInstructions });
+export async function runRepl(cwd: string): Promise<void> {
+  const context = await createRuntimeContext(cwd);
+  if (!context) return;
+  const { config, projectInstructions, runtime, agent } = context;
 
   output.write(`HelixCode ready in ${config.cwd}\n`);
   if (projectInstructions.length) {
@@ -128,6 +145,8 @@ async function handleAgentResult(
     agent: TerminalAgent;
     config: ReturnType<typeof loadConfig>;
     rl: ReturnType<typeof createInterface> | null;
+    autoConfirm?: boolean;
+    remainingTurns?: number;
   }
 ): Promise<void> {
   if (result.type === 'final') {
@@ -161,6 +180,34 @@ function formatConfirmedToolResult(result: ConfirmedToolResult): string {
   return ['Result: ok', result.output].filter(Boolean).join('\n');
 }
 
+async function createRuntimeContext(cwd: string): Promise<{
+  config: ReturnType<typeof loadConfig>;
+  projectInstructions: Awaited<ReturnType<typeof loadProjectInstructions>>;
+  runtime: { model: string };
+  agent: TerminalAgent;
+} | null> {
+  const config = loadConfig({ cwd });
+  if (!config.apiKey.trim()) {
+    output.write(`${formatMissingApiKeyMessage()}\n`);
+    process.exitCode = 1;
+    return null;
+  }
+
+  const projectInstructions = await loadProjectInstructions(config.cwd);
+  const runtime = { model: config.model };
+  const provider = new OpenAIChatProvider(config, runtime);
+  const agent = new TerminalAgent({ cwd: config.cwd, provider, projectInstructions });
+  return { config, projectInstructions, runtime, agent };
+}
+
+export function joinPromptArgs(parts: string[]): string {
+  return parts.join(' ').trim();
+}
+
+export function parseMaxTurns(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
+}
 export function formatMissingApiKeyMessage(): string {
   return [
     'HELIX_API_KEY is not set. Set HELIX_API_KEY to enable HelixCode agent reasoning.',
