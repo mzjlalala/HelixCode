@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { TerminalAgent } from '../src/agent/terminal-agent.js';
+import { executeConfirmedTool } from '../src/agent/confirmed-action.js';
 import type { ChatProvider } from '../src/llm/types.js';
 
 class ScriptedProvider implements ChatProvider {
@@ -44,6 +45,29 @@ describe('TerminalAgent', () => {
     const result = await agent.run('run tests');
 
     expect(result.type).toBe('confirmation');
-    if (result.type === 'confirmation') expect(result.command).toBe('npm test');
+    if (result.type === 'confirmation') {
+      expect(result.tool).toBe('run_shell');
+      expect(result.args.command).toBe('npm test');
+    }
+  });
+
+  it('asks for confirmation before writing files and can execute the confirmed write', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({
+        tool: 'write_file',
+        args: { path: 'notes.txt', content: 'hello from HelixCode\n' }
+      })
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const result = await agent.run('write a note');
+
+    expect(result.type).toBe('confirmation');
+    if (result.type === 'confirmation') {
+      expect(result.tool).toBe('write_file');
+      const confirmed = await executeConfirmedTool(cwd, result);
+      expect(confirmed.ok).toBe(true);
+    }
   });
 });

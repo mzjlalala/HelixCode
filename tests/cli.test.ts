@@ -17,6 +17,19 @@ describe('slash commands', () => {
     expect(result.handled).toBe(true);
     if (result.handled) expect(result.exit).toBe(true);
   });
+
+  it('renders status when context is provided', () => {
+    const result = handleSlashCommand('/status', {
+      cwd: 'D:/Code/HelixCode',
+      model: 'gpt-test'
+    });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.output).toContain('D:/Code/HelixCode');
+      expect(result.output).toContain('gpt-test');
+    }
+  });
 });
 
 describe('CLI entry detection', () => {

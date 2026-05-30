@@ -5,7 +5,12 @@ import type { ChatMessage, ChatProvider } from '../llm/types.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string }
-  | { type: 'confirmation'; command: string; reason: string };
+  | {
+      type: 'confirmation';
+      tool: 'run_shell' | 'write_file';
+      args: Record<string, unknown>;
+      summary: string;
+    };
 
 interface ToolRequest {
   tool: string;
@@ -35,7 +40,21 @@ export class TerminalAgent {
         if (risk.risk === 'blocked') {
           return { type: 'final', message: risk.reason ?? 'Command blocked.' };
         }
-        return { type: 'confirmation', command, reason: 'Shell commands require confirmation.' };
+        return {
+          type: 'confirmation',
+          tool: 'run_shell',
+          args: { command },
+          summary: `Run shell command: ${command}`
+        };
+      }
+
+      if (request.tool === 'write_file') {
+        return {
+          type: 'confirmation',
+          tool: 'write_file',
+          args: request.args ?? {},
+          summary: `Write file: ${String(request.args?.path ?? '')}`
+        };
       }
 
       const observation = await this.executeTool(request);
@@ -87,6 +106,7 @@ function systemPrompt(): string {
     'Reply normally when you can answer.',
     'When you need a tool, reply with strict JSON like {"tool":"read_file","args":{"path":"README.md"}}.',
     'Available safe tools: read_file, list_files, search_files, git_status, git_diff.',
+    'To write a file, use {"tool":"write_file","args":{"path":"path/to/file","content":"new content"}} and wait for user confirmation.',
     'For shell commands, use {"tool":"run_shell","args":{"command":"npm test"}} and wait for user confirmation.'
   ].join('\n');
 }

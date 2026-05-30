@@ -1,5 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { relative, resolve } from 'node:path';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, relative, resolve } from 'node:path';
 
 export type FileToolResult =
   | { ok: true; content: string }
@@ -40,6 +40,29 @@ export async function readFileTool(
 
   try {
     return { ok: true, content: await readFile(resolved.content, 'utf8') };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function writeFileTool(
+  cwd: string,
+  args: { path?: unknown; content?: unknown }
+): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  if (typeof args.path !== 'string' || !args.path.trim()) {
+    return { ok: false, error: 'write_file requires a string path.' };
+  }
+  if (typeof args.content !== 'string') {
+    return { ok: false, error: 'write_file requires string content.' };
+  }
+
+  const resolved = resolveInsideProject(cwd, args.path);
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+
+  try {
+    await mkdir(dirname(resolved.content), { recursive: true });
+    await writeFile(resolved.content, args.content, 'utf8');
+    return { ok: true, path: args.path };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

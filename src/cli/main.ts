@@ -8,7 +8,7 @@ import { loadConfig } from '../core/config.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { handleSlashCommand } from './slash-commands.js';
-import { runShellCommand } from '../tools/shell.js';
+import { executeConfirmedTool } from '../agent/confirmed-action.js';
 
 const program = new Command();
 
@@ -25,39 +25,76 @@ export async function runRepl(cwd: string): Promise<void> {
   const config = loadConfig({ cwd });
   const provider = new OpenAIChatProvider(config);
   const agent = new TerminalAgent({ cwd: config.cwd, provider });
-  const rl = createInterface({ input, output });
 
   output.write(`HelixCode ready in ${config.cwd}\n`);
   output.write('Type /help for commands, /exit to quit.\n\n');
 
+  if (!input.isTTY) {
+    const content = await readAllStdin();
+    for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+      output.write('helix> ');
+      const exit = await handleInputLine(line, { agent, config, rl: null });
+      if (exit) return;
+    }
+    return;
+  }
+
+  const rl = createInterface({ input, output });
+
   while (true) {
     const line = (await rl.question('helix> ')).trim();
     if (!line) continue;
-
-    const slash = handleSlashCommand(line);
-    if (slash.handled) {
-      output.write(`${slash.output}\n`);
-      if (slash.clear) console.clear();
-      if (slash.exit) break;
-      continue;
-    }
-
-    const result = await agent.run(line);
-    if (result.type === 'final') {
-      output.write(`${result.message}\n`);
-      continue;
-    }
-
-    const answer = (await rl.question(`Run "${result.command}"? [y/N] `)).trim().toLowerCase();
-    if (answer === 'y' || answer === 'yes') {
-      const commandResult = await runShellCommand(config.cwd, result.command);
-      output.write(`${JSON.stringify(commandResult, null, 2)}\n`);
-    } else {
-      output.write('Command skipped.\n');
-    }
+    if (await handleInputLine(line, { agent, config, rl })) break;
   }
 
   rl.close();
+}
+
+async function handleInputLine(
+  line: string,
+  context: {
+    agent: TerminalAgent;
+    config: ReturnType<typeof loadConfig>;
+    rl: ReturnType<typeof createInterface> | null;
+  }
+): Promise<boolean> {
+  const slash = handleSlashCommand(line, {
+    cwd: context.config.cwd,
+    model: context.config.model
+  });
+  if (slash.handled) {
+    output.write(`${slash.output}\n`);
+    if (slash.clear) console.clear();
+    return slash.exit;
+  }
+
+  const result = await context.agent.run(line);
+  if (result.type === 'final') {
+    output.write(`${result.message}\n`);
+    return false;
+  }
+
+  if (!context.rl) {
+    output.write(`${result.summary}? [y/N] Command skipped in non-interactive mode.\n`);
+    return false;
+  }
+
+  const answer = (await context.rl.question(`${result.summary}? [y/N] `)).trim().toLowerCase();
+  if (answer === 'y' || answer === 'yes') {
+    const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    output.write(`${JSON.stringify(commandResult, null, 2)}\n`);
+  } else {
+    output.write('Command skipped.\n');
+  }
+  return false;
+}
+
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of input) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 export function isMainModule(metaUrl: string, argvPath: string | undefined): boolean {

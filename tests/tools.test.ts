@@ -1,8 +1,8 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { readFileTool, searchFilesTool } from '../src/tools/filesystem.js';
+import { readFileTool, searchFilesTool, writeFileTool } from '../src/tools/filesystem.js';
 import { classifyShellCommand } from '../src/tools/shell.js';
 
 async function makeProject(): Promise<string> {
@@ -38,6 +38,20 @@ describe('filesystem tools', () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.matches.map((m) => m.path)).toContain('README.md');
+  });
+
+  it('writes files inside the project root', async () => {
+    const cwd = await makeProject();
+
+    const result = await writeFileTool(cwd, {
+      path: 'notes/result.txt',
+      content: 'created by HelixCode\n'
+    });
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(join(cwd, 'notes/result.txt'), 'utf8')).resolves.toContain(
+      'created by HelixCode'
+    );
   });
 });
 
