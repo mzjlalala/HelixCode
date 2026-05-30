@@ -22,14 +22,14 @@ class TestLLMConfig:
         assert cfg.temperature == 0.7
 
     def test_env_override(self) -> None:
-        """Environment variables prefixed with HELIX_LLM_ override defaults."""
+        """Environment variables prefixed with HELIX_MODEL_ override defaults."""
         with patch.dict(
             os.environ,
             {
-                'HELIX_LLM_API_KEY': 'env-key',
-                'HELIX_LLM_CHAT_MODEL': 'gpt-4-turbo',
-                'HELIX_LLM_MAX_TOKENS': '8192',
-                'HELIX_LLM_TEMPERATURE': '0.3',
+                'HELIX_MODEL_API_KEY': 'env-key',
+                'HELIX_MODEL_CHAT_MODEL': 'gpt-4-turbo',
+                'HELIX_MODEL_MAX_TOKENS': '8192',
+                'HELIX_MODEL_TEMPERATURE': '0.3',
             },
         ):
             cfg = LLMConfig()
@@ -83,7 +83,7 @@ class TestSettings:
         with patch.dict(
             os.environ,
             {
-                'HELIX_LLM_API_KEY': 'top-level-key',
+                'HELIX_MODEL_API_KEY': 'top-level-key',
                 'HELIX_LOG_LEVEL': 'DEBUG',
             },
         ):

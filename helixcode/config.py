@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LLMConfig(BaseSettings):
     """Configuration for the LLM provider (OpenAI-compatible API)."""
 
-    model_config = SettingsConfigDict(env_prefix='HELIX_LLM_')
+    model_config = SettingsConfigDict(env_prefix='HELIX_MODEL_')
 
     api_key: str = ''
     base_url: str = 'https://api.openai.com/v1'
