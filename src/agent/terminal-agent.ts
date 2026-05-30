@@ -33,10 +33,11 @@ export class TerminalAgent {
     cwd: string;
     provider: ChatProvider;
     projectInstructions?: ProjectInstruction[];
+    onToken?: (token: string) => void;
   }) {}
 
-  async run(input: string): Promise<AgentTurnResult> {
-    return this.completeTurn([{ role: 'user', content: input }]);
+  async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
+    return this.completeTurn([{ role: 'user', content: input }], true, options?.signal);
   }
 
   async continueAfterConfirmation(
@@ -90,7 +91,7 @@ export class TerminalAgent {
     return this.plan.map((item) => ({ ...item }));
   }
 
-  private async completeTurn(turnMessages: ChatMessage[]): Promise<AgentTurnResult> {
+  private async completeTurn(turnMessages: ChatMessage[], streamFirst = false, signal?: AbortSignal): Promise<AgentTurnResult> {
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
       ...this.history,
@@ -98,7 +99,7 @@ export class TerminalAgent {
     ];
 
     for (let i = 0; i < 6; i += 1) {
-      const response = await this.options.provider.complete(messages);
+      const response = await this.getLLMResponse(messages, streamFirst && i === 0, signal);
       const request = parseToolRequest(response);
 
       if (!request) {
@@ -182,6 +183,14 @@ export class TerminalAgent {
 
     this.appendHistory(turnMessages);
     return { type: 'final', message: 'HelixCode stopped after too many tool rounds.' };
+  }
+
+  private async getLLMResponse(messages: ChatMessage[], useStream: boolean, signal?: AbortSignal): Promise<string> {
+    if (useStream && this.options.onToken && this.options.provider.completeStream) {
+      const onToken = this.options.onToken;
+      return this.options.provider.completeStream(messages, onToken, signal ? { signal } : undefined);
+    }
+    return this.options.provider.complete(messages);
   }
 
   private async executeTool(request: ToolRequest): Promise<string> {

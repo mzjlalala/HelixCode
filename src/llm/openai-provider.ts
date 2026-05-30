@@ -1,4 +1,4 @@
-﻿import OpenAI from 'openai';
+import OpenAI from 'openai';
 import type {
   ChatCompletionCreateParamsNonStreaming,
   ChatCompletionMessageParam
@@ -46,6 +46,49 @@ export class OpenAIChatProvider implements ChatProvider {
 
       return response.choices?.[0]?.message?.content ?? '';
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return [
+        `Model request failed for provider ${this.config.provider}.`,
+        `model: ${this.runtime.model}`,
+        `base URL: ${this.config.baseURL}`,
+        `error: ${message}`
+      ].join('\n');
+    }
+  }
+
+  async completeStream(
+    messages: ChatMessage[],
+    onToken: (token: string) => void,
+    options?: { signal?: AbortSignal }
+  ): Promise<string> {
+    if (!this.config.apiKey.trim()) {
+      return 'HELIX_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY is not set.';
+    }
+
+    try {
+      const stream = await (this.client as OpenAI).chat.completions.create(
+        {
+          model: this.runtime.model,
+          messages: toOpenAIMessages(messages) as ChatCompletionMessageParam[],
+          temperature: 0.2,
+          stream: true
+        },
+        { signal: options?.signal }
+      ) as AsyncIterable<{
+        choices?: Array<{ delta?: { content?: string | null } }>;
+      }>;
+
+      let fullContent = '';
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          onToken(delta);
+          fullContent += delta;
+        }
+      }
+      return fullContent;
+    } catch (error) {
+      if (options?.signal?.aborted) return '';
       const message = error instanceof Error ? error.message : String(error);
       return [
         `Model request failed for provider ${this.config.provider}.`,

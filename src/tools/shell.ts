@@ -30,6 +30,9 @@ export function classifyShellCommand(command: string): ShellRisk {
   return { risk: 'confirm' };
 }
 
+const SHELL_TIMEOUT_MS = 120_000;
+const SHELL_MAX_BUFFER = 10 * 1024 * 1024;
+
 export async function runShellCommand(
   cwd: string,
   command: string
@@ -40,26 +43,40 @@ export async function runShellCommand(
   }
 
   try {
-    const result = await execAsync(command, { cwd, windowsHide: true });
+    const result = await execAsync(command, {
+      cwd,
+      windowsHide: true,
+      timeout: SHELL_TIMEOUT_MS,
+      maxBuffer: SHELL_MAX_BUFFER
+    });
     return { ok: true, stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
   } catch (error) {
-    const err = error as { stdout?: string; stderr?: string; code?: number; message?: string };
-    return { ok: false, error: formatShellFailure(err) };
+    const err = error as { stdout?: string; stderr?: string; code?: number; killed?: boolean; message?: string };
+    return { ok: false, error: formatShellFailure(command, err) };
   }
 }
 
-function formatShellFailure(error: {
-  stdout?: string;
-  stderr?: string;
-  code?: number;
-  message?: string;
-}): string {
+function formatShellFailure(
+  command: string,
+  error: {
+    stdout?: string;
+    stderr?: string;
+    code?: number;
+    killed?: boolean;
+    message?: string;
+  }
+): string {
   const exitCode = typeof error.code === 'number' ? error.code : 1;
-  const lines = [`Command exited with exit code ${exitCode}.`];
+  let lines: string[];
+  if (error.killed) {
+    lines = [`Command timed out after ${SHELL_TIMEOUT_MS / 1000}s: ${command}`];
+  } else {
+    lines = [`Command failed (exit code ${exitCode}): ${command}`];
+  }
   if (error.stdout) lines.push(`stdout:\n${error.stdout.trimEnd()}`);
   if (error.stderr) {
     lines.push(`stderr:\n${error.stderr.trimEnd()}`);
-  } else if (error.message) {
+  } else if (error.message && !error.killed) {
     lines.push(`stderr:\n${error.message}`);
   }
   return lines.join('\n');

@@ -1,5 +1,5 @@
 import type { AgentTurnResult } from './terminal-agent.js';
-import { readFileTool, replaceInFileTool, writeFileTool } from '../tools/filesystem.js';
+import { editFileTool, readFileTool, replaceInFileTool, writeFileTool } from '../tools/filesystem.js';
 import { applyPatchTool } from '../tools/patch.js';
 import { runShellCommand } from '../tools/shell.js';
 import { classifyShellCommand } from '../tools/shell.js';
@@ -16,6 +16,9 @@ export async function previewConfirmedTool(cwd: string, confirmation: Confirmati
   }
   if (confirmation.tool === 'replace_in_file') {
     return previewReplaceInFile(cwd, confirmation);
+  }
+  if (confirmation.tool === 'edit_file') {
+    return previewEditFile(cwd, confirmation);
   }
   return previewShell(cwd, confirmation);
 }
@@ -46,6 +49,17 @@ export async function executeConfirmedTool(
     });
     if (!result.ok) return result;
     return { ok: true, output: `Replaced ${result.replacements} match(es) in ${result.path}` };
+  }
+
+  if (confirmation.tool === 'edit_file') {
+    const result = await editFileTool(cwd, {
+      path: confirmation.args.path,
+      startLine: confirmation.args.startLine,
+      endLine: confirmation.args.endLine,
+      content: confirmation.args.content
+    });
+    if (!result.ok) return result;
+    return { ok: true, output: `Edited ${result.path} lines ${String(confirmation.args.startLine)}-${String(confirmation.args.endLine)}` };
   }
 
   const command = String(confirmation.args.command ?? '');
@@ -110,6 +124,27 @@ async function previewReplaceInFile(cwd: string, confirmation: Confirmation): Pr
   ].join('\n');
 }
 
+async function previewEditFile(cwd: string, confirmation: Confirmation): Promise<string> {
+  const path = String(confirmation.args.path ?? '');
+  const startLine = Number(confirmation.args.startLine);
+  const endLine = Number(confirmation.args.endLine);
+  const content = typeof confirmation.args.content === 'string' ? confirmation.args.content : '';
+  const current = await readFileTool(cwd, { path });
+  const before = current.ok ? current.content : '';
+  const lines = before.replace(/\r\n/g, '\n').split('\n');
+  const replacement = content.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
+  const afterLines = [...lines];
+  if (Number.isInteger(startLine) && Number.isInteger(endLine) && startLine > 0 && endLine >= startLine) {
+    afterLines.splice(startLine - 1, endLine - startLine + 1, ...replacement);
+  }
+  return [
+    'Tool: edit_file',
+    `Target: ${path || '(missing path)'}`,
+    `Lines: ${Number.isFinite(startLine) ? startLine : '?'}-${Number.isFinite(endLine) ? endLine : '?'}`,
+    'Preview:',
+    createCompactTextDiff(before, afterLines.join('\n'))
+  ].join('\n');
+}
 function previewShell(cwd: string, confirmation: Confirmation): string {
   const command = String(confirmation.args.command ?? '');
   const risk = classifyShellCommand(command);

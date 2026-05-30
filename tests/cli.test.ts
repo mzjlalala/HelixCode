@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { handleSlashCommand } from '../src/cli/slash-commands.js';
-import { createDoctorOutput, formatMissingApiKeyMessage, isMainModule, joinPromptArgs, parseMaxTurns } from '../src/cli/main.js';
+import { createDoctorOutput, formatMissingApiKeyMessage, formatOneShotGitSummary, isMainModule, joinPromptArgs, parseMaxTurns } from '../src/cli/main.js';
 
 describe('slash commands', () => {
   it('renders help', () => {
@@ -130,6 +130,12 @@ describe('one-shot prompt helpers', () => {
     expect(parseMaxTurns('3')).toBe(3);
     expect(parseMaxTurns('0')).toBe(10);
     expect(parseMaxTurns(undefined)).toBe(10);
+  });
+
+  it('formats one-shot git summaries', () => {
+    expect(formatOneShotGitSummary('', '')).toBe('Git changes: none');
+    expect(formatOneShotGitSummary(' M README.md\n', ' README.md | 2 +-\n')).toContain('Git changes:');
+    expect(formatOneShotGitSummary(' M README.md\n', ' README.md | 2 +-\n')).toContain('README.md | 2 +-');
   });
 });
 describe('CLI entry detection', () => {

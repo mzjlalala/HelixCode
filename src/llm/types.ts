@@ -5,4 +5,10 @@ export interface ChatMessage {
 
 export interface ChatProvider {
   complete(messages: ChatMessage[]): Promise<string>;
+
+  completeStream?(
+    messages: ChatMessage[],
+    onToken: (token: string) => void,
+    options?: { signal?: AbortSignal }
+  ): Promise<string>;
 }

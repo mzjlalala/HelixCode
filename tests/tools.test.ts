@@ -229,6 +229,7 @@ describe('shell safety', () => {
       expect(result.error).toContain('exit code 3');
       expect(result.error).toContain('shell out');
       expect(result.error).toContain('shell err');
+      expect(result.error).toContain(command.slice(0, 20));
     }
   });
 

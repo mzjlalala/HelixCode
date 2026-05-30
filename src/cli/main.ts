@@ -14,6 +14,14 @@ import { formatDoctor, handleSlashCommand } from './slash-commands.js';
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
 
+// Top-level error boundary — catch crashes that would otherwise terminate the process silently
+process.on('unhandledRejection', (reason) => {
+  output.write(`\nUnhandled error: ${reason instanceof Error ? reason.message : String(reason)}\n`);
+});
+process.on('uncaughtException', (error) => {
+  output.write(`\nFatal error: ${error.message}\n`);
+});
+
 const execFileAsync = promisify(execFile);
 
 const program = new Command();
@@ -26,26 +34,56 @@ program
   .option('--doctor', 'Show local HelixCode diagnostics and exit')
   .option('-y, --yes', 'Automatically execute confirmed actions in one-shot mode')
   .option('--max-turns <number>', 'Maximum one-shot confirmation turns', '10')
+  .option('--model <name>', 'Chat model to use (overrides HELIX_CHAT_MODEL)')
   .argument('[prompt...]', 'Task to run once without starting the REPL')
-  .action(async (promptParts: string[], options: { cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string }) => {
+  .action(async (promptParts: string[], options: {
+    cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string; model?: string
+  }) => {
     if (options.doctor) {
       output.write(`${await createDoctorOutput(options.cwd)}\n`);
       return;
     }
     const prompt = joinPromptArgs(promptParts);
     if (prompt) {
-      await runOnce(options.cwd, prompt, { autoConfirm: options.yes === true, maxTurns: parseMaxTurns(options.maxTurns) });
+      await runOnce(options.cwd, prompt, {
+        autoConfirm: options.yes === true,
+        maxTurns: parseMaxTurns(options.maxTurns),
+        ...(options.model ? { model: options.model } : {})
+      });
       return;
     }
-    await runRepl(options.cwd);
+    await runRepl(options.cwd, options.model);
   });
+
+// Module-level state for Ctrl+C abort across functions
+let currentAbort: AbortController | null = null;
+
+// Simple spinner on stderr — returns stop() that clears the line
+let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+
+function startSpinner(): void {
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let i = 0;
+  spinnerTimer = setInterval(() => {
+    process.stderr.write(`\r${frames[i]}`);
+    i = (i + 1) % frames.length;
+  }, 80);
+}
+
+function stopSpinner(): void {
+  if (spinnerTimer !== null) {
+    clearInterval(spinnerTimer);
+    spinnerTimer = null;
+    process.stderr.write('\r\x1b[K');
+  }
+}
 
 export async function runOnce(
   cwd: string,
   prompt: string,
-  options: { autoConfirm?: boolean; maxTurns?: number } = {}
+  options: { autoConfirm?: boolean; maxTurns?: number; model?: string } = {}
 ): Promise<void> {
-  const context = await createRuntimeContext(cwd);
+  const context = await createRuntimeContext(cwd, options.model);
   if (!context) return;
   const result = await context.agent.run(prompt);
   await handleAgentResult(result, {
@@ -58,14 +96,17 @@ export async function runOnce(
   output.write(`${await createOneShotGitSummary(context.config.cwd)}\n`);
 }
 
-export async function runRepl(cwd: string): Promise<void> {
-  const context = await createRuntimeContext(cwd);
+export async function runRepl(cwd: string, modelOverride?: string): Promise<void> {
+  const context = await createRuntimeContext(cwd, modelOverride);
   if (!context) return;
   const { config, projectInstructions, runtime, agent } = context;
 
   output.write(`HelixCode ready in ${config.cwd}\n`);
   if (projectInstructions.length) {
     output.write(`Loaded project instructions: ${projectInstructions.map((item) => item.path).join(', ')}\n`);
+  }
+  if (modelOverride) {
+    output.write(`Model: ${runtime.model}\n`);
   }
   output.write('Type /help for commands, /exit to quit.\n\n');
 
@@ -81,7 +122,15 @@ export async function runRepl(cwd: string): Promise<void> {
 
   const rl = createInterface({ input, output });
   let closing = false;
+
   rl.on('SIGINT', () => {
+    if (currentAbort) {
+      currentAbort.abort();
+      currentAbort = null;
+      stopSpinner();
+      output.write('\n');
+      return;
+    }
     closing = true;
     output.write('\nGoodbye.\n');
     rl.close();
@@ -140,8 +189,19 @@ async function handleInputLine(
     return slash.exit;
   }
 
-  const result = await context.agent.run(line);
-  await handleAgentResult(result, context);
+  const abort = new AbortController();
+  currentAbort = abort;
+  startSpinner();
+  try {
+    const result = await context.agent.run(line, { signal: abort.signal });
+    if (result.type === 'final' && abort.signal.aborted) {
+      return false;
+    }
+    await handleAgentResult(result, context);
+  } finally {
+    stopSpinner();
+    if (currentAbort === abort) currentAbort = null;
+  }
   return false;
 }
 
@@ -203,13 +263,16 @@ function formatConfirmedToolResult(result: ConfirmedToolResult): string {
   return ['Result: ok', result.output].filter(Boolean).join('\n');
 }
 
-async function createRuntimeContext(cwd: string): Promise<{
+async function createRuntimeContext(cwd: string, modelOverride?: string): Promise<{
   config: ReturnType<typeof loadConfig>;
   projectInstructions: Awaited<ReturnType<typeof loadProjectInstructions>>;
   runtime: { model: string };
   agent: TerminalAgent;
 } | null> {
   const config = loadConfig({ cwd });
+  if (modelOverride) {
+    config.model = modelOverride;
+  }
   if (!config.apiKey.trim()) {
     output.write(`${formatMissingApiKeyMessage()}\n`);
     process.exitCode = 1;
@@ -219,7 +282,15 @@ async function createRuntimeContext(cwd: string): Promise<{
   const projectInstructions = await loadProjectInstructions(config.cwd);
   const runtime = { model: config.model };
   const provider = new OpenAIChatProvider(config, runtime);
-  const agent = new TerminalAgent({ cwd: config.cwd, provider, projectInstructions });
+  const agent = new TerminalAgent({
+    cwd: config.cwd,
+    provider,
+    projectInstructions,
+    onToken: (token) => {
+      stopSpinner();
+      output.write(token);
+    }
+  });
   return { config, projectInstructions, runtime, agent };
 }
 
