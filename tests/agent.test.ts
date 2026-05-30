@@ -4,14 +4,16 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { TerminalAgent } from '../src/agent/terminal-agent.js';
 import { executeConfirmedTool } from '../src/agent/confirmed-action.js';
-import type { ChatProvider } from '../src/llm/types.js';
+import type { ChatMessage, ChatProvider } from '../src/llm/types.js';
 
 class ScriptedProvider implements ChatProvider {
   private index = 0;
+  readonly calls: ChatMessage[][] = [];
 
   constructor(private readonly responses: string[]) {}
 
-  async complete(): Promise<string> {
+  async complete(messages: ChatMessage[]): Promise<string> {
+    this.calls.push(messages);
     const response = this.responses[this.index];
     this.index += 1;
     if (response === undefined) throw new Error('No scripted response left');
@@ -68,6 +70,30 @@ describe('TerminalAgent', () => {
       expect(result.tool).toBe('write_file');
       const confirmed = await executeConfirmedTool(cwd, result);
       expect(confirmed.ok).toBe(true);
+    }
+  });
+
+  it('continues the conversation after confirmed actions', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({
+        tool: 'write_file',
+        args: { path: 'notes.txt', content: 'hello from HelixCode\n' }
+      }),
+      'Created notes.txt.'
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const result = await agent.run('write a note');
+
+    expect(result.type).toBe('confirmation');
+    if (result.type === 'confirmation') {
+      const confirmed = await executeConfirmedTool(cwd, result);
+      const followUp = await agent.continueAfterConfirmation(result, confirmed);
+
+      expect(followUp.type).toBe('final');
+      if (followUp.type === 'final') expect(followUp.message).toContain('notes.txt');
+      expect(provider.calls.at(-1)?.some((message) => message.role === 'tool')).toBe(true);
     }
   });
 });

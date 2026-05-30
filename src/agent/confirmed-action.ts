@@ -1,5 +1,6 @@
 import type { AgentTurnResult } from './terminal-agent.js';
 import { writeFileTool } from '../tools/filesystem.js';
+import { applyPatchTool } from '../tools/patch.js';
 import { runShellCommand } from '../tools/shell.js';
 
 export async function executeConfirmedTool(
@@ -13,6 +14,10 @@ export async function executeConfirmedTool(
     });
     if (!result.ok) return result;
     return { ok: true, output: `Wrote ${result.path}` };
+  }
+
+  if (confirmation.tool === 'apply_patch') {
+    return applyPatchTool(cwd, { patch: confirmation.args.patch });
   }
 
   const command = String(confirmation.args.command ?? '');

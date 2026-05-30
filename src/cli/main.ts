@@ -60,33 +60,52 @@ async function handleInputLine(
 ): Promise<boolean> {
   const slash = handleSlashCommand(line, {
     cwd: context.config.cwd,
-    model: context.config.model
+    model: context.config.model,
+    historyMessages: context.agent.historySize()
   });
   if (slash.handled) {
     output.write(`${slash.output}\n`);
-    if (slash.clear) console.clear();
+    if (slash.clear) {
+      context.agent.clearHistory();
+      console.clear();
+    }
     return slash.exit;
   }
 
   const result = await context.agent.run(line);
+  await handleAgentResult(result, context);
+  return false;
+}
+
+async function handleAgentResult(
+  result: Awaited<ReturnType<TerminalAgent['run']>>,
+  context: {
+    agent: TerminalAgent;
+    config: ReturnType<typeof loadConfig>;
+    rl: ReturnType<typeof createInterface> | null;
+  }
+): Promise<void> {
   if (result.type === 'final') {
     output.write(`${result.message}\n`);
-    return false;
+    return;
   }
 
   if (!context.rl) {
     output.write(`${result.summary}? [y/N] Command skipped in non-interactive mode.\n`);
-    return false;
+    context.agent.recordSkippedConfirmation(result);
+    return;
   }
 
   const answer = (await context.rl.question(`${result.summary}? [y/N] `)).trim().toLowerCase();
   if (answer === 'y' || answer === 'yes') {
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
     output.write(`${JSON.stringify(commandResult, null, 2)}\n`);
+    const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
+    await handleAgentResult(followUp, context);
   } else {
+    context.agent.recordSkippedConfirmation(result);
     output.write('Command skipped.\n');
   }
-  return false;
 }
 
 async function readAllStdin(): Promise<string> {

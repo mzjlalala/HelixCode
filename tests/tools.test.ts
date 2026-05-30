@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { readFileTool, searchFilesTool, writeFileTool } from '../src/tools/filesystem.js';
+import { applyPatchTool } from '../src/tools/patch.js';
 import { classifyShellCommand } from '../src/tools/shell.js';
 
 async function makeProject(): Promise<string> {
@@ -52,6 +53,50 @@ describe('filesystem tools', () => {
     await expect(readFile(join(cwd, 'notes/result.txt'), 'utf8')).resolves.toContain(
       'created by HelixCode'
     );
+  });
+});
+
+describe('patch tools', () => {
+  it('applies unified diffs inside the project', async () => {
+    const cwd = await makeProject();
+
+    const result = await applyPatchTool(cwd, {
+      patch: [
+        'diff --git a/README.md b/README.md',
+        '--- a/README.md',
+        '+++ b/README.md',
+        '@@ -1,2 +1,2 @@',
+        ' # HelixCode',
+        '-terminal agent',
+        '+terminal coding agent',
+        ''
+      ].join('\n')
+    });
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(join(cwd, 'README.md'), 'utf8')).resolves.toContain(
+      'terminal coding agent'
+    );
+  });
+
+  it('rejects patch paths outside the project', async () => {
+    const cwd = await makeProject();
+
+    const result = await applyPatchTool(cwd, {
+      patch: [
+        'diff --git a/README.md b/../README.md',
+        '--- a/README.md',
+        '+++ b/../README.md',
+        '@@ -1,2 +1,2 @@',
+        ' # HelixCode',
+        '-terminal agent',
+        '+terminal coding agent',
+        ''
+      ].join('\n')
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/outside the project/i);
   });
 });
 
