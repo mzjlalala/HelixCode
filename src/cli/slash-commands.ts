@@ -43,6 +43,7 @@ export function handleSlashCommand(
         '/status  Show current project, model, and session state',
         '/doctor  Show local HelixCode diagnostics',
         '/model   Show or switch the current chat model',
+        '/model <name>   Switch to a named chat model',
         '/history Show current session history size',
         '/plan    Show current session plan',
         '/compact Compact session history',
@@ -63,7 +64,7 @@ export function handleSlashCommand(
       handled: true,
       exit: false,
       clear: false,
-      output: `Current model: ${context.model ?? 'unknown'}`
+      output: `Current model: ${context.model ?? 'unknown'}\nUsage: /model <name>`
     };
   }
 

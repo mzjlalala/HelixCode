@@ -43,7 +43,10 @@ describe('slash commands', () => {
     const updated = handleSlashCommand('/model gpt-4.1-mini', { model: 'gpt-test' });
 
     expect(current.handled).toBe(true);
-    if (current.handled) expect(current.output).toBe('Current model: gpt-test');
+    if (current.handled) {
+      expect(current.output).toContain('gpt-test');
+      expect(current.output).toContain('/model <name>');
+    }
 
     expect(updated.handled).toBe(true);
     if (updated.handled) {
