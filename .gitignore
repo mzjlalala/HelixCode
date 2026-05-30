@@ -70,3 +70,4 @@ dmypy.json
 # Project-specific
 helixcode.db
 *.qdrant/
+plan.md
