@@ -122,7 +122,7 @@ def fix(
 def main():
     """入口：无参数时默认进入对话模式，--version 显示版本。"""
     if len(sys.argv) == 1:
-        chat()
+        chat(project_root=None)
     elif sys.argv[1] in ('--version', '-v'):
         print(f'HelixCode v{__version__}')
     else:
