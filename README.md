@@ -52,7 +52,8 @@ npm run build
 
 ```powershell
 helix
-helix "explain this project"`r`nhelix --yes --max-turns 10 "fix the failing tests"
+helix "explain this project"
+helix --yes --max-turns 10 "fix the failing tests"
 ```
 
 Passing a prompt runs one non-interactive agent turn and exits. Confirmed actions
@@ -106,6 +107,7 @@ from the actual command result.
 - `update_plan`
 - `write_file`
 - `replace_in_file`
+- `edit_file`
 - `apply_patch`
 - `run_shell`
 

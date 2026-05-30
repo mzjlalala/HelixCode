@@ -122,6 +122,7 @@ export function handleSlashCommand(
         'HelixCode status:',
         `cwd: ${context.cwd ?? process.cwd()}`,
         `model: ${context.model ?? 'unknown'}`,
+        `provider: ${context.provider ?? 'unknown'}`,
         `history messages: ${context.historyMessages ?? 0}`,
         `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`
       ].join('\n')
@@ -142,6 +143,7 @@ export function handleSlashCommand(
         'git_diff       Inspect git diff',
         'write_file     Write a file after confirmation',
         'replace_in_file Replace exact text after confirmation',
+        'edit_file      Replace an inclusive line range after confirmation',
         'apply_patch    Apply a unified diff after confirmation',
         'run_shell      Run a shell command after confirmation'
       ].join('\n')
@@ -188,6 +190,7 @@ export function formatDoctor(context: SlashCommandContext): string {
     'HelixCode doctor:',
     `cwd: ${context.cwd ?? process.cwd()}`,
     `model: ${context.model ?? 'unknown'}`,
+    `provider: ${context.provider ?? 'unknown'}`,
     `base URL: ${context.baseURL ?? 'unknown'}`,
     `api key: ${context.apiKeyConfigured ? 'set' : 'missing'}`,
     `node: ${process.version}`,

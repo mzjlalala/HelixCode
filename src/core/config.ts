@@ -35,6 +35,7 @@ export function loadConfig(options: { cwd?: string } = {}): HelixConfig {
 function normalizeProvider(value: string | undefined): LlmProvider {
   const normalized = value?.trim().toLowerCase();
   if (normalized === 'deepseek' || normalized === 'openai' || normalized === 'custom') return normalized;
+  if (process.env.HELIX_BASE_URL?.toLowerCase().includes('deepseek.com')) return 'deepseek';
   return 'openai';
 }
 

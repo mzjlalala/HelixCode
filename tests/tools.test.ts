@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
+  editFileTool,
   readFileTool,
   replaceInFileTool,
   searchFilesTool,
@@ -126,6 +127,35 @@ describe('filesystem tools', () => {
       expect(result.error).toContain('missing phrase');
       expect(result.error).toMatch(/whitespace\/casing|read the file again/i);
     }
+  });
+  it('edits a file by replacing an inclusive line range', async () => {
+    const cwd = await makeProject();
+    await writeFile(join(cwd, 'lines.txt'), 'one\ntwo\nthree\nfour\n', 'utf8');
+
+    const result = await editFileTool(cwd, {
+      path: 'lines.txt',
+      startLine: 2,
+      endLine: 3,
+      content: 'TWO\nTHREE'
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.linesChanged).toBe(2);
+    await expect(readFile(join(cwd, 'lines.txt'), 'utf8')).resolves.toBe('one\nTWO\nTHREE\nfour\n');
+  });
+
+  it('rejects invalid edit line ranges', async () => {
+    const cwd = await makeProject();
+
+    const result = await editFileTool(cwd, {
+      path: 'README.md',
+      startLine: 3,
+      endLine: 2,
+      content: 'bad'
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/endLine/i);
   });
 });
 

@@ -9,7 +9,7 @@ export type AgentTurnResult =
   | { type: 'final'; message: string }
   | {
       type: 'confirmation';
-      tool: 'run_shell' | 'write_file' | 'apply_patch' | 'replace_in_file';
+      tool: 'run_shell' | 'write_file' | 'apply_patch' | 'replace_in_file' | 'edit_file';
       args: Record<string, unknown>;
       summary: string;
     };
@@ -92,7 +92,7 @@ export class TerminalAgent {
 
   private async completeTurn(turnMessages: ChatMessage[]): Promise<AgentTurnResult> {
     const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt(this.options.projectInstructions ?? []) },
+      { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
       ...this.history,
       ...turnMessages
     ];
@@ -159,12 +159,22 @@ export class TerminalAgent {
         };
       }
 
+      if (request.tool === 'edit_file') {
+        this.appendHistory(turnMessages);
+        return {
+          type: 'confirmation',
+          tool: 'edit_file',
+          args: request.args ?? {},
+          summary: `Edit file: ${String(request.args?.path ?? '')} lines ${String(request.args?.startLine ?? '')}-${String(request.args?.endLine ?? '')}`
+        };
+      }
+
       const observation = await this.executeTool(request);
       turnMessages.push({ role: 'tool', content: observation });
       messages.splice(
         0,
         messages.length,
-        { role: 'system', content: systemPrompt(this.options.projectInstructions ?? []) },
+        { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
         ...this.history,
         ...turnMessages
       );
@@ -233,13 +243,22 @@ export class TerminalAgent {
   }
 }
 
-function systemPrompt(projectInstructions: ProjectInstruction[]): string {
+export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): string {
   const lines = [
-    'You are HelixCode, a terminal coding agent.',
-    'Reply normally when you can answer.',
-    'When you need a tool, reply with strict JSON like {"tool":"read_file","args":{"path":"README.md"}}.',
+    'You are HelixCode, a terminal coding agent for local software projects.',
+    'Be concise, practical, and focused on completing the user request.',
+    'Reply normally when no tool is needed.',
+    'Reply with exactly one JSON object when calling a tool. Do not wrap tool JSON in prose or Markdown.',
+    'Tool call shape: {"tool":"read_file","args":{"path":"README.md"}}.',
     'Available safe tools: read_file, list_files, search_files, git_status, git_diff, update_plan.',
-    'Use update_plan with items [{"step":"...","status":"pending|in_progress|completed"}] to track multi-step work.',
+    'Available confirmed tools: write_file, replace_in_file, edit_file, apply_patch, run_shell.',
+    'Before editing, inspect the relevant files with read_file or search_files.',
+    'Prefer search_files for finding code, symbols, or text across the project.',
+    'Use update_plan for multi-step work, keeping exactly one item in_progress when a plan is useful.',
+    'Make small, targeted edits that match the existing code style.',
+    'Prefer replace_in_file for small exact edits, edit_file for line-range edits after reading line numbers, and apply_patch for larger multi-line edits.',
+    'After changing code, run the smallest relevant verification command such as npm test, npm run typecheck, or npm run build.',
+    'If a tool returns an error, read the error and recover instead of retrying the same invalid call.',
     'read_file accepts optional startLine and endLine. search_files accepts optional glob, caseSensitive, maxResults, and contextLines.',
     'To write a file, use {"tool":"write_file","args":{"path":"path/to/file","content":"new content"}} and wait for user confirmation.',
     'To replace exact text in a file, use {"tool":"replace_in_file","args":{"path":"path/to/file","oldText":"old","newText":"new"}} and wait for user confirmation. Set replaceAll true only when every match should change.',

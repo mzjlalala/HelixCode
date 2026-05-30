@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { TerminalAgent } from '../src/agent/terminal-agent.js';
+import { buildSystemPrompt, TerminalAgent } from '../src/agent/terminal-agent.js';
 import { executeConfirmedTool } from '../src/agent/confirmed-action.js';
 import type { ChatMessage, ChatProvider } from '../src/llm/types.js';
 
@@ -21,7 +21,15 @@ class ScriptedProvider implements ChatProvider {
   }
 }
 
-describe('TerminalAgent', () => {
+describe('TerminalAgent', () => {  it('guides the model through a coding-agent tool workflow', () => {
+    const prompt = buildSystemPrompt([]);
+
+    expect(prompt).toContain('Before editing, inspect the relevant files');
+    expect(prompt).toContain('Prefer search_files');
+    expect(prompt).toContain('After changing code, run the smallest relevant verification command');
+    expect(prompt).toContain('Reply with exactly one JSON object when calling a tool');
+  });
+
   it('executes a safe read_file tool call and returns a final response', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
     await writeFile(join(cwd, 'README.md'), '# HelixCode\n', 'utf8');
@@ -172,6 +180,24 @@ describe('TerminalAgent', () => {
     }
   });
 
+  it('asks for confirmation before editing line ranges', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({
+        tool: 'edit_file',
+        args: { path: 'README.md', startLine: 1, endLine: 1, content: '# New title' }
+      })
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const result = await agent.run('edit README');
+
+    expect(result.type).toBe('confirmation');
+    if (result.type === 'confirmation') {
+      expect(result.tool).toBe('edit_file');
+      expect(result.args.path).toBe('README.md');
+    }
+  });
   it('continues the conversation after confirmed actions', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
     const provider = new ScriptedProvider([

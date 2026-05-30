@@ -68,6 +68,23 @@ describe('confirmed action previews', () => {
     expect(preview).toContain('+new line');
   });
 
+  it('previews edit_file actions with a compact diff', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-preview-'));
+    await writeFile(join(cwd, 'README.md'), 'one\ntwo\nthree\n', 'utf8');
+
+    const preview = await previewConfirmedTool(cwd, {
+      type: 'confirmation',
+      tool: 'edit_file',
+      args: { path: 'README.md', startLine: 2, endLine: 2, content: 'TWO' },
+      summary: 'Edit file: README.md lines 2-2'
+    });
+
+    expect(preview).toContain('Tool: edit_file');
+    expect(preview).toContain('Target: README.md');
+    expect(preview).toContain('Lines: 2-2');
+    expect(preview).toContain('-two');
+    expect(preview).toContain('+TWO');
+  });
   it('previews run_shell actions with working directory and risk', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-preview-'));
 

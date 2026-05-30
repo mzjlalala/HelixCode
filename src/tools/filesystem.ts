@@ -109,6 +109,45 @@ export async function replaceInFileTool(
   return { ok: true, path: args.path, replacements: args.replaceAll === true ? matches : 1 };
 }
 
+export async function editFileTool(
+  cwd: string,
+  args: { path?: unknown; startLine?: unknown; endLine?: unknown; content?: unknown }
+): Promise<{ ok: true; path: string; linesChanged: number } | { ok: false; error: string }> {
+  if (typeof args.path !== 'string' || !args.path.trim()) {
+    return { ok: false, error: 'edit_file requires a string path.' };
+  }
+  if (typeof args.content !== 'string') {
+    return { ok: false, error: 'edit_file requires string content.' };
+  }
+  const startLine = positiveInteger(args.startLine, 0);
+  const endLine = positiveInteger(args.endLine, 0);
+  if (!startLine || !endLine) {
+    return { ok: false, error: 'edit_file requires positive integer startLine and endLine.' };
+  }
+  if (endLine < startLine) {
+    return { ok: false, error: 'endLine must be greater than or equal to startLine.' };
+  }
+
+  const current = await readFileTool(cwd, { path: args.path });
+  if (!current.ok) return { ok: false, error: current.error };
+
+  const normalized = current.content.replace(/\r\n/g, '\n');
+  const hadTrailingNewline = normalized.endsWith('\n');
+  const lines = normalized.replace(/\n$/, '').split('\n');
+  if (startLine > lines.length + 1) {
+    return { ok: false, error: `startLine ${startLine} is beyond the end of ${args.path}.` };
+  }
+  if (endLine > lines.length) {
+    return { ok: false, error: `endLine ${endLine} is beyond the end of ${args.path}.` };
+  }
+
+  const replacement = args.content.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
+  lines.splice(startLine - 1, endLine - startLine + 1, ...replacement);
+  const nextContent = `${lines.join('\n')}${hadTrailingNewline ? '\n' : ''}`;
+  const written = await writeFileTool(cwd, { path: args.path, content: nextContent });
+  if (!written.ok) return written;
+  return { ok: true, path: args.path, linesChanged: endLine - startLine + 1 };
+}
 async function walk(cwd: string, dir = '.'): Promise<string[]> {
   const entries = await readdir(resolve(cwd, dir), { withFileTypes: true });
   const files: string[] = [];

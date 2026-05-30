@@ -3,6 +3,8 @@ import { Command } from 'commander';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { realpath } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadProjectInstructions } from '../core/config.js';
@@ -11,6 +13,8 @@ import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { formatDoctor, handleSlashCommand } from './slash-commands.js';
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
+
+const execFileAsync = promisify(execFile);
 
 const program = new Command();
 
@@ -51,6 +55,7 @@ export async function runOnce(
     autoConfirm: options.autoConfirm === true,
     remainingTurns: options.maxTurns ?? 10
   });
+  output.write(`${await createOneShotGitSummary(context.config.cwd)}\n`);
 }
 
 export async function runRepl(cwd: string): Promise<void> {
@@ -111,6 +116,7 @@ async function handleInputLine(
     cwd: context.config.cwd,
     model: context.runtime.model,
     baseURL: context.config.baseURL,
+    provider: context.config.provider,
     apiKeyConfigured: Boolean(context.config.apiKey.trim()),
     historyMessages: context.agent.historySize(),
     projectInstructions: context.projectInstructions.map((item) => item.path),
@@ -157,13 +163,30 @@ async function handleAgentResult(
   const preview = await previewConfirmedTool(context.config.cwd, result);
   output.write(`${preview}\n`);
 
-  if (!context.rl) {
-    output.write(`${result.summary}? [y/N] Command skipped in non-interactive mode.\n`);
+  if (!context.rl && context.autoConfirm !== true) {
+    output.write(`${result.summary}? [y/N] Command skipped in non-interactive mode.
+`);
     context.agent.recordSkippedConfirmation(result);
     return;
   }
 
-  const answer = (await context.rl.question(`${result.summary}? [y/N] `)).trim().toLowerCase();
+  if (!context.rl && context.autoConfirm === true) {
+    const remainingTurns = context.remainingTurns ?? 10;
+    if (remainingTurns <= 0) {
+      output.write('Stopped after reaching --max-turns.\n');
+      return;
+    }
+    output.write(`${result.summary}? [y/N] Auto-approved by --yes.\n`);
+    const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    output.write(`${formatConfirmedToolResult(commandResult)}\n`);
+    const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
+    await handleAgentResult(followUp, { ...context, remainingTurns: remainingTurns - 1 });
+    return;
+  }
+
+  const rl = context.rl;
+  if (!rl) return;
+  const answer = (await rl.question(`${result.summary}? [y/N] `)).trim().toLowerCase();
   if (answer === 'y' || answer === 'yes') {
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
@@ -208,6 +231,30 @@ export function parseMaxTurns(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
 }
+async function createOneShotGitSummary(cwd: string): Promise<string> {
+  const [status, diffStat] = await Promise.all([
+    runGit(cwd, ['status', '--short']),
+    runGit(cwd, ['diff', '--stat'])
+  ]);
+  return formatOneShotGitSummary(status, diffStat);
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  try {
+    const result = await execFileAsync('git', args, { cwd, windowsHide: true });
+    return result.stdout;
+  } catch {
+    return '';
+  }
+}
+
+export function formatOneShotGitSummary(status: string, diffStat: string): string {
+  const cleanStatus = status.trimEnd();
+  const cleanDiffStat = diffStat.trimEnd();
+  if (!cleanStatus && !cleanDiffStat) return 'Git changes: none';
+  return ['Git changes:', cleanStatus, cleanDiffStat].filter(Boolean).join('\n');
+}
+
 export function formatMissingApiKeyMessage(): string {
   return [
     'HELIX_API_KEY is not set. Set HELIX_API_KEY to enable HelixCode agent reasoning.',
@@ -224,6 +271,7 @@ export async function createDoctorOutput(cwd: string): Promise<string> {
     cwd: config.cwd,
     model: config.model,
     baseURL: config.baseURL,
+    provider: config.provider,
     apiKeyConfigured: Boolean(config.apiKey.trim()),
     historyMessages: 0,
     projectInstructions: projectInstructions.map((item) => item.path),

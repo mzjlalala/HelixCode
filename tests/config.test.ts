@@ -50,6 +50,15 @@ describe('loadConfig', () => {
     expect(config.model).toBe('deepseek-chat');
     expect(config.baseURL).toBe('https://api.deepseek.com');
   });
+  it('infers DeepSeek provider from a DeepSeek base URL', () => {
+    delete process.env.HELIX_PROVIDER;
+    process.env.HELIX_BASE_URL = 'https://api.deepseek.com';
+    process.env.DEEPSEEK_API_KEY = 'deepseek-key';
+
+    const config = loadConfig({ cwd: 'D:/work/repo' });
+
+    expect(config.provider).toBe('deepseek');
+  });
 });
 
 describe('loadProjectInstructions', () => {
