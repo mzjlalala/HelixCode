@@ -1,0 +1,30 @@
+{
+  "name": "helixcode",
+  "version": "0.1.0",
+  "description": "HelixCode terminal coding agent.",
+  "type": "module",
+  "bin": {
+    "helix": "./dist/main.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli/main.ts",
+    "build": "tsup src/cli/main.ts --format esm --clean --out-dir dist",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "*",
+    "dotenv": "*",
+    "openai": "*"
+  },
+  "devDependencies": {
+    "@types/node": "*",
+    "tsup": "*",
+    "tsx": "*",
+    "typescript": "*",
+    "vitest": "*"
+  }
+}
