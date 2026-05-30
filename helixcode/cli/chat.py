@@ -89,21 +89,22 @@ class HelixChat:
 
         流程：查找相关代码 → 构建上下文 → 流式输出 LLM 回复。
         """
-        self._session.add_message('user', user_input)
-
-        # 1. 查找相关文件
+        # 1. 查找相关文件内容
         code_context, file_count = self._gather_context(user_input)
         if file_count > 0:
             console.print(f'  [dim]📄 已加载 {file_count} 个相关文件[/]')
 
-        # 2. 构建消息：有文件上下文时放在用户消息里；无上下文时直接用原始输入
+        # 2. 构建增强消息：把文件内容直接拼进用户消息
         if code_context:
-            user_message = (
+            enhanced_input = (
                 f'{user_input}\n\n'
-                f'--- 项目相关文件 ---\n\n{code_context}'
+                f'--- 项目文件内容，请基于此分析 ---\n\n{code_context}'
             )
         else:
-            user_message = user_input
+            enhanced_input = user_input
+
+        # 存入 session 的是增强后的消息
+        self._session.add_message('user', enhanced_input)
 
         # 3. 流式输出
         console.print()
@@ -115,10 +116,14 @@ class HelixChat:
         try:
             system_prompt = SYSTEM_PROMPT + f'\n\n当前项目: {self._project_root}'
             if code_context:
-                system_prompt += '\n用户消息中已附带相关文件内容，请直接分析，不要说找不到文件。'
+                system_prompt += '\n用户消息中已附带相关文件内容，请直接基于文件内容分析。'
+
+            # 构建消息列表发给 LLM：历史 + 当前消息
+            messages = history[:-1] if len(history) > 1 else []
+            messages.append({'role': 'user', 'content': enhanced_input})
 
             stream = self._chat.chat_stream(
-                history[:-1] if len(history) > 1 else [],
+                messages,
                 system=system_prompt,
             )
 
