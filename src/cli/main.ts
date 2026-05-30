@@ -31,7 +31,8 @@ export async function runRepl(cwd: string): Promise<void> {
   }
 
   const projectInstructions = await loadProjectInstructions(config.cwd);
-  const provider = new OpenAIChatProvider(config);
+  const runtime = { model: config.model };
+  const provider = new OpenAIChatProvider(config, runtime);
   const agent = new TerminalAgent({ cwd: config.cwd, provider, projectInstructions });
 
   output.write(`HelixCode ready in ${config.cwd}\n`);
@@ -44,7 +45,7 @@ export async function runRepl(cwd: string): Promise<void> {
     const content = await readAllStdin();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
       output.write('helix> ');
-      const exit = await handleInputLine(line, { agent, config, projectInstructions, rl: null });
+      const exit = await handleInputLine(line, { agent, config, projectInstructions, runtime, rl: null });
       if (exit) return;
     }
     return;
@@ -67,7 +68,7 @@ export async function runRepl(cwd: string): Promise<void> {
       break;
     }
     if (!line) continue;
-    if (await handleInputLine(line, { agent, config, projectInstructions, rl })) break;
+    if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl })) break;
   }
 
   rl.close();
@@ -79,18 +80,22 @@ async function handleInputLine(
     agent: TerminalAgent;
     config: ReturnType<typeof loadConfig>;
     projectInstructions: Awaited<ReturnType<typeof loadProjectInstructions>>;
+    runtime: { model: string };
     rl: ReturnType<typeof createInterface> | null;
   }
 ): Promise<boolean> {
   const slash = handleSlashCommand(line, {
     cwd: context.config.cwd,
-    model: context.config.model,
+    model: context.runtime.model,
     historyMessages: context.agent.historySize(),
     projectInstructions: context.projectInstructions.map((item) => item.path),
     planItems: context.agent.currentPlan(),
     compactedHistoryMessages: 20
   });
   if (slash.handled) {
+    if (slash.model) {
+      context.runtime.model = slash.model;
+    }
     if (slash.compact) {
       context.agent.compactHistory(20);
     }

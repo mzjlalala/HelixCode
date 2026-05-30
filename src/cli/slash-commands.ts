@@ -1,7 +1,15 @@
 import type { PlanItem } from '../agent/terminal-agent.js';
 
 export type SlashCommandResult =
-  | { handled: true; output: string; exit: boolean; clear: boolean; reset?: boolean; compact?: boolean }
+  | {
+      handled: true;
+      output: string;
+      exit: boolean;
+      clear: boolean;
+      reset?: boolean;
+      compact?: boolean;
+      model?: string;
+    }
   | { handled: false };
 
 export interface SlashCommandContext {
@@ -30,6 +38,7 @@ export function handleSlashCommand(
         'HelixCode commands:',
         '/help    Show this help',
         '/status  Show current project, model, and session state',
+        '/model   Show or switch the current chat model',
         '/history Show current session history size',
         '/plan    Show current session plan',
         '/compact Compact session history',
@@ -43,6 +52,29 @@ export function handleSlashCommand(
 
   if (command === '/clear') {
     return { handled: true, exit: false, clear: true, output: 'Session cleared.' };
+  }
+
+  if (command === '/model') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      output: `Current model: ${context.model ?? 'unknown'}`
+    };
+  }
+
+  if (command.startsWith('/model ')) {
+    const model = input.trim().slice('/model '.length).trim();
+    if (!model) {
+      return { handled: true, exit: false, clear: false, output: 'Model name is required.' };
+    }
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      model,
+      output: `Model set to ${model}`
+    };
   }
 
   if (command === '/reset') {

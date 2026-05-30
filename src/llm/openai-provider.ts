@@ -6,7 +6,10 @@ import type { ChatMessage, ChatProvider } from './types.js';
 export class OpenAIChatProvider implements ChatProvider {
   private readonly client: OpenAI;
 
-  constructor(private readonly config: HelixConfig) {
+  constructor(
+    private readonly config: HelixConfig,
+    private readonly runtime: { model: string } = { model: config.model }
+  ) {
     this.client = new OpenAI({
       apiKey: config.apiKey || 'missing-key',
       baseURL: config.baseURL
@@ -19,7 +22,7 @@ export class OpenAIChatProvider implements ChatProvider {
     }
 
     const response = await this.client.chat.completions.create({
-      model: this.config.model,
+      model: this.runtime.model,
       messages: toOpenAIMessages(messages),
       temperature: 0.2
     });

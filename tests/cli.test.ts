@@ -35,6 +35,20 @@ describe('slash commands', () => {
     }
   });
 
+  it('renders and updates the active model', () => {
+    const current = handleSlashCommand('/model', { model: 'gpt-test' });
+    const updated = handleSlashCommand('/model gpt-4.1-mini', { model: 'gpt-test' });
+
+    expect(current.handled).toBe(true);
+    if (current.handled) expect(current.output).toBe('Current model: gpt-test');
+
+    expect(updated.handled).toBe(true);
+    if (updated.handled) {
+      expect(updated.model).toBe('gpt-4.1-mini');
+      expect(updated.output).toBe('Model set to gpt-4.1-mini');
+    }
+  });
+
   it('renders history count from context', () => {
     const result = handleSlashCommand('/history', { historyMessages: 7 });
 
