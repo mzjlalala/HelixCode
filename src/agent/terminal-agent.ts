@@ -78,6 +78,14 @@ export class TerminalAgent {
     return this.history.length;
   }
 
+  compactHistory(keepMessages = 20): number {
+    const keep = Math.max(0, Math.floor(keepMessages));
+    if (this.history.length > keep) {
+      this.history.splice(0, this.history.length - keep);
+    }
+    return this.history.length;
+  }
+
   currentPlan(): PlanItem[] {
     return this.plan.map((item) => ({ ...item }));
   }

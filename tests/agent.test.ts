@@ -78,6 +78,32 @@ describe('TerminalAgent', () => {
     ]);
   });
 
+  it('compacts history without clearing the current plan', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({
+        tool: 'update_plan',
+        args: { items: [{ step: 'Keep this plan', status: 'in_progress' }] }
+      }),
+      'Plan updated.',
+      ...Array.from({ length: 12 }, (_, index) => `Reply ${index}`)
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    await agent.run('plan');
+    for (let index = 0; index < 12; index += 1) {
+      await agent.run(`message ${index}`);
+    }
+
+    const before = agent.historySize();
+    const after = agent.compactHistory(5);
+
+    expect(before).toBeGreaterThan(5);
+    expect(after).toBe(5);
+    expect(agent.historySize()).toBe(5);
+    expect(agent.currentPlan()).toEqual([{ step: 'Keep this plan', status: 'in_progress' }]);
+  });
+
   it('asks for confirmation before running shell commands', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
     const provider = new ScriptedProvider([

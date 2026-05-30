@@ -1,7 +1,7 @@
 import type { PlanItem } from '../agent/terminal-agent.js';
 
 export type SlashCommandResult =
-  | { handled: true; output: string; exit: boolean; clear: boolean; reset?: boolean }
+  | { handled: true; output: string; exit: boolean; clear: boolean; reset?: boolean; compact?: boolean }
   | { handled: false };
 
 export interface SlashCommandContext {
@@ -10,6 +10,7 @@ export interface SlashCommandContext {
   historyMessages?: number;
   projectInstructions?: string[];
   planItems?: PlanItem[];
+  compactedHistoryMessages?: number;
 }
 
 export function handleSlashCommand(
@@ -31,6 +32,7 @@ export function handleSlashCommand(
         '/status  Show current project, model, and session state',
         '/history Show current session history size',
         '/plan    Show current session plan',
+        '/compact Compact session history',
         '/tools   Show available agent tools',
         '/reset   Clear session context',
         '/clear   Clear the screen and session context',
@@ -50,6 +52,16 @@ export function handleSlashCommand(
       clear: false,
       reset: true,
       output: 'Session context reset.'
+    };
+  }
+
+  if (command === '/compact') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      compact: true,
+      output: `Session history compacted to ${context.compactedHistoryMessages ?? 20} messages.`
     };
   }
 

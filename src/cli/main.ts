@@ -87,9 +87,13 @@ async function handleInputLine(
     model: context.config.model,
     historyMessages: context.agent.historySize(),
     projectInstructions: context.projectInstructions.map((item) => item.path),
-    planItems: context.agent.currentPlan()
+    planItems: context.agent.currentPlan(),
+    compactedHistoryMessages: 20
   });
   if (slash.handled) {
+    if (slash.compact) {
+      context.agent.compactHistory(20);
+    }
     output.write(`${slash.output}\n`);
     if (slash.clear || slash.reset) {
       context.agent.clearHistory();

@@ -67,6 +67,16 @@ describe('slash commands', () => {
       expect(result.output).toBe('Session context reset.');
     }
   });
+
+  it('recognizes compact as a history-compacting command', () => {
+    const result = handleSlashCommand('/compact', { compactedHistoryMessages: 20 });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.compact).toBe(true);
+      expect(result.output).toBe('Session history compacted to 20 messages.');
+    }
+  });
 });
 
 describe('CLI entry detection', () => {

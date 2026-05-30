@@ -56,6 +56,7 @@ Useful slash commands:
 /status
 /history
 /plan
+/compact
 /tools
 /reset
 /clear
@@ -92,7 +93,7 @@ use `/plan` to inspect it during the current session.
 `contextLines` fields. Prefer `replace_in_file` for small exact edits; it shows
 a confirmation preview before changing the target file.
 
-Use `/reset` to clear session context without clearing the screen, `/clear` to clear both, and `/history` to inspect the current context size.
+Use `/reset` to clear session context without clearing the screen, `/compact` to keep only the most recent session messages, `/clear` to clear both the screen and session context, and `/history` to inspect the current context size.
 
 Tool requests are parsed from strict JSON, fenced JSON code blocks, or a balanced JSON object embedded in a short assistant response.
 
