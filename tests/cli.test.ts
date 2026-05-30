@@ -3,10 +3,20 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { handleSlashCommand } from '../src/cli/slash-commands.js';
+import { completeSlashCommand, formatSlashCommandCandidates, handleSlashCommand } from '../src/cli/slash-commands.js';
 import { createDoctorOutput, formatMissingApiKeyMessage, formatOneShotGitSummary, isMainModule, joinPromptArgs, parseMaxTurns } from '../src/cli/main.js';
 
-describe('slash commands', () => {
+describe('slash commands', () => {  it('completes slash commands by prefix with descriptions', () => {
+    expect(completeSlashCommand('/d')).toEqual(['/doctor']);
+    expect(completeSlashCommand('/mo')).toEqual(['/model']);
+
+    const candidates = formatSlashCommandCandidates('/');
+    expect(candidates).toContain('/help');
+    expect(candidates).toContain('Show this help');
+    expect(formatSlashCommandCandidates('/d')).toContain('/doctor');
+    expect(formatSlashCommandCandidates('/d')).not.toContain('/help');
+  });
+
   it('renders help', () => {
     const result = handleSlashCommand('/help');
 
@@ -118,7 +128,32 @@ describe('slash commands', () => {
     expect(result.handled).toBe(true);
     if (result.handled) {
       expect(result.compact).toBe(true);
+      expect(result.compactKeep).toBe(20);
       expect(result.output).toBe('Session history compacted from 42 to 20 messages.');
+    }
+  });
+
+  it('compacts to a specific number with /compact N', () => {
+    const result = handleSlashCommand('/compact 10', {
+      historyMessages: 50
+    });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.compactKeep).toBe(10);
+      expect(result.output).toContain('10 messages');
+    }
+  });
+
+  it('rejects invalid /compact N values and uses default', () => {
+    const result = handleSlashCommand('/compact 0', {
+      historyMessages: 50,
+      compactedHistoryMessages: 20
+    });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.compactKeep).toBe(20);
     }
   });
 });

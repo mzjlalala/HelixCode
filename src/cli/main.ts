@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { createInterface } from 'node:readline/promises';
+import type { CompleterResult } from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
 import { realpath } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
@@ -10,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, loadProjectInstructions } from '../core/config.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
-import { formatDoctor, handleSlashCommand } from './slash-commands.js';
+import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS } from './slash-commands.js';
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
 
@@ -57,6 +58,7 @@ program
 
 // Module-level state for Ctrl+C abort across functions
 let currentAbort: AbortController | null = null;
+
 
 // Simple spinner on stderr — returns stop() that clears the line
 let spinnerTimer: ReturnType<typeof setInterval> | null = null;
@@ -108,7 +110,8 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
   if (modelOverride) {
     output.write(`Model: ${runtime.model}\n`);
   }
-  output.write('Type /help for commands, /exit to quit.\n\n');
+  output.write(`Commands: ${SLASH_COMMANDS.map((item) => item.name).join(' ')}\n`);
+  output.write('Type /help for details, /exit to quit.\n\n');
 
   if (!input.isTTY) {
     const content = await readAllStdin();
@@ -120,7 +123,15 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
     return;
   }
 
-  const rl = createInterface({ input, output });
+  const rl = createInterface({
+    input,
+    output,
+    completer: (line: string): CompleterResult => {
+      if (!line.trimStart().startsWith('/')) return [[], line];
+      const candidates = completeSlashCommand(line);
+      return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
+    }
+  });
   let closing = false;
 
   rl.on('SIGINT', () => {
@@ -177,7 +188,7 @@ async function handleInputLine(
       context.runtime.model = slash.model;
     }
     if (slash.compact) {
-      context.agent.compactHistory(20);
+      context.agent.compactHistory(slash.compactKeep ?? 20);
     }
     output.write(`${slash.output}\n`);
     if (slash.clear || slash.reset) {

@@ -1,5 +1,48 @@
 import type { PlanItem } from '../agent/terminal-agent.js';
 
+export interface SlashCommandDefinition {
+  name: string;
+  description: string;
+  usage?: string;
+}
+
+export const SLASH_COMMANDS: SlashCommandDefinition[] = [
+  { name: '/help', description: 'Show this help' },
+  { name: '/status', description: 'Show current project, model, and session state' },
+  { name: '/doctor', description: 'Show local HelixCode diagnostics' },
+  { name: '/model', description: 'Show or switch the current chat model', usage: '/model <name>' },
+  { name: '/history', description: 'Show current session history size' },
+  { name: '/plan', description: 'Show current session plan' },
+  { name: '/compact', description: 'Compact session history', usage: '/compact [keep]' },
+  { name: '/tools', description: 'Show available agent tools' },
+  { name: '/reset', description: 'Clear session context' },
+  { name: '/clear', description: 'Clear the screen and session context' },
+  { name: '/exit', description: 'Exit HelixCode' },
+  { name: '/quit', description: 'Exit HelixCode' },
+  { name: '/q', description: 'Exit HelixCode' }
+];
+
+export function completeSlashCommand(input: string): string[] {
+  const prefix = input.trim().toLowerCase();
+  if (!prefix.startsWith('/')) return [];
+  const matches = SLASH_COMMANDS.map((item) => item.name).filter((name) => name.startsWith(prefix));
+  return matches.length ? matches : SLASH_COMMANDS.map((item) => item.name);
+}
+
+export function formatSlashCommandCandidates(input: string): string {
+  const names = new Set(completeSlashCommand(input));
+  const rows = SLASH_COMMANDS.filter((item) => names.has(item.name));
+  const width = Math.max(...rows.map((item) => (item.usage ?? item.name).length));
+  return rows.map((item) => {
+    const label = item.usage ?? item.name;
+    return `${label.padEnd(width)}  ${item.description}`;
+  }).join('\n');
+}
+
+function formatSlashHelp(): string {
+  return ['HelixCode commands:', formatSlashCommandCandidates('/')].join('\n');
+}
+
 export type SlashCommandResult =
   | {
       handled: true;
@@ -8,6 +51,7 @@ export type SlashCommandResult =
       clear: boolean;
       reset?: boolean;
       compact?: boolean;
+      compactKeep?: number;
       model?: string;
     }
   | { handled: false };
@@ -37,21 +81,7 @@ export function handleSlashCommand(
       handled: true,
       exit: false,
       clear: false,
-      output: [
-        'HelixCode commands:',
-        '/help    Show this help',
-        '/status  Show current project, model, and session state',
-        '/doctor  Show local HelixCode diagnostics',
-        '/model   Show or switch the current chat model',
-        '/model <name>   Switch to a named chat model',
-        '/history Show current session history size',
-        '/plan    Show current session plan',
-        '/compact Compact session history',
-        '/tools   Show available agent tools',
-        '/reset   Clear session context',
-        '/clear   Clear the screen and session context',
-        '/exit    Exit HelixCode'
-      ].join('\n')
+      output: formatSlashHelp()
     };
   }
 
@@ -101,15 +131,17 @@ export function handleSlashCommand(
     };
   }
 
-  if (command === '/compact') {
+  if (command === '/compact' || command.startsWith('/compact ')) {
     const before = context.historyMessages ?? 0;
-    const keep = context.compactedHistoryMessages ?? 20;
+    const requested = parseInt(command === '/compact' ? '' : command.slice('/compact '.length).trim(), 10);
+    const keep = Number.isFinite(requested) && requested > 0 ? requested : (context.compactedHistoryMessages ?? 20);
     const after = Math.min(before, keep);
     return {
       handled: true,
       exit: false,
       clear: false,
       compact: true,
+      compactKeep: keep,
       output: `Session history compacted from ${before} to ${after} messages.`
     };
   }
@@ -173,8 +205,19 @@ export function handleSlashCommand(
     return { handled: true, exit: true, clear: false, output: 'Goodbye.' };
   }
 
+  // "/" alone shows available commands (useful when Tab completion doesn't work on some terminals)
+  if (command === '/') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      output: ['Available commands:', formatSlashCommandCandidates('/')].join('\n')
+    };
+  }
+
   return { handled: true, exit: false, clear: false, output: `Unknown command: ${input}` };
 }
+
 
 function formatPlan(items: PlanItem[]): string {
   if (!items.length) return 'No active plan.';
