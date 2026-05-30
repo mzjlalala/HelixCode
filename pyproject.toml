@@ -46,7 +46,7 @@ dev = [
 ]
 
 [project.scripts]
-helix = "helixcode.cli.main:app"
+helix = "helixcode.cli.main:main"
 
 [tool.ruff]
 target-version = "py313"
