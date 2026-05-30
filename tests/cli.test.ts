@@ -42,6 +42,21 @@ describe('slash commands', () => {
     if (result.handled) expect(result.output).toBe('Session history messages: 7');
   });
 
+  it('renders the current plan from context', () => {
+    const result = handleSlashCommand('/plan', {
+      planItems: [
+        { step: 'Inspect files', status: 'completed' },
+        { step: 'Implement change', status: 'in_progress' }
+      ]
+    });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.output).toContain('[done] Inspect files');
+      expect(result.output).toContain('[active] Implement change');
+    }
+  });
+
   it('recognizes reset as a context-clearing command without clearing the screen', () => {
     const result = handleSlashCommand('/reset');
 

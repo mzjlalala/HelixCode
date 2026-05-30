@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../core/config.js';
+import { loadConfig, loadProjectInstructions } from '../core/config.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { handleSlashCommand } from './slash-commands.js';
@@ -30,17 +30,21 @@ export async function runRepl(cwd: string): Promise<void> {
     return;
   }
 
+  const projectInstructions = await loadProjectInstructions(config.cwd);
   const provider = new OpenAIChatProvider(config);
-  const agent = new TerminalAgent({ cwd: config.cwd, provider });
+  const agent = new TerminalAgent({ cwd: config.cwd, provider, projectInstructions });
 
   output.write(`HelixCode ready in ${config.cwd}\n`);
+  if (projectInstructions.length) {
+    output.write(`Loaded project instructions: ${projectInstructions.map((item) => item.path).join(', ')}\n`);
+  }
   output.write('Type /help for commands, /exit to quit.\n\n');
 
   if (!input.isTTY) {
     const content = await readAllStdin();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
       output.write('helix> ');
-      const exit = await handleInputLine(line, { agent, config, rl: null });
+      const exit = await handleInputLine(line, { agent, config, projectInstructions, rl: null });
       if (exit) return;
     }
     return;
@@ -63,7 +67,7 @@ export async function runRepl(cwd: string): Promise<void> {
       break;
     }
     if (!line) continue;
-    if (await handleInputLine(line, { agent, config, rl })) break;
+    if (await handleInputLine(line, { agent, config, projectInstructions, rl })) break;
   }
 
   rl.close();
@@ -74,13 +78,16 @@ async function handleInputLine(
   context: {
     agent: TerminalAgent;
     config: ReturnType<typeof loadConfig>;
+    projectInstructions: Awaited<ReturnType<typeof loadProjectInstructions>>;
     rl: ReturnType<typeof createInterface> | null;
   }
 ): Promise<boolean> {
   const slash = handleSlashCommand(line, {
     cwd: context.config.cwd,
     model: context.config.model,
-    historyMessages: context.agent.historySize()
+    historyMessages: context.agent.historySize(),
+    projectInstructions: context.projectInstructions.map((item) => item.path),
+    planItems: context.agent.currentPlan()
   });
   if (slash.handled) {
     output.write(`${slash.output}\n`);

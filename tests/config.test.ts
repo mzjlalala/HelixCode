@@ -1,5 +1,8 @@
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/core/config.js';
+import { loadConfig, loadProjectInstructions } from '../src/core/config.js';
 
 const originalEnv = { ...process.env };
 
@@ -31,5 +34,21 @@ describe('loadConfig', () => {
     expect(config.apiKey).toBe('test-key');
     expect(config.model).toBe('custom-model');
     expect(config.baseURL).toBe('https://example.test/v1');
+  });
+});
+
+describe('loadProjectInstructions', () => {
+  it('loads AGENTS.md and .helix instructions from the project root', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-config-'));
+    await writeFile(join(cwd, 'AGENTS.md'), 'Use JDK 17 from C:/DevelopTool/JDK17.\n', 'utf8');
+    await mkdir(join(cwd, '.helix'), { recursive: true });
+    await writeFile(join(cwd, '.helix', 'instructions.md'), 'Prefer small tests.\n', 'utf8');
+
+    const instructions = await loadProjectInstructions(cwd);
+
+    expect(instructions).toEqual([
+      { path: 'AGENTS.md', content: 'Use JDK 17 from C:/DevelopTool/JDK17.\n' },
+      { path: '.helix/instructions.md', content: 'Prefer small tests.\n' }
+    ]);
   });
 });

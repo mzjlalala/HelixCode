@@ -45,12 +45,17 @@ If neither `HELIX_API_KEY` nor `OPENAI_API_KEY` is set, HelixCode exits before
 starting the REPL and prints a short setup hint. `helix --help` still works
 without an API key.
 
+Project-specific instructions can be placed in `AGENTS.md` or
+`.helix/instructions.md` at the project root. HelixCode loads both files when
+present and includes them in the agent's system prompt.
+
 Useful slash commands:
 
 ```text
 /help
 /status
 /history
+/plan
 /tools
 /reset
 /clear
@@ -72,11 +77,20 @@ from the actual command result.
 - `search_files`
 - `git_status`
 - `git_diff`
+- `update_plan`
 - `write_file`
+- `replace_in_file`
 - `apply_patch`
 - `run_shell`
 
 The REPL keeps short session context, so the agent can use prior tool observations and confirmed action results while the process is running.
+The agent can maintain a lightweight in-memory task plan with `update_plan`;
+use `/plan` to inspect it during the current session.
+
+`read_file` can read a full file or a line range with `startLine` and `endLine`.
+`search_files` accepts optional `glob`, `caseSensitive`, `maxResults`, and
+`contextLines` fields. Prefer `replace_in_file` for small exact edits; it shows
+a confirmation preview before changing the target file.
 
 Use `/reset` to clear session context without clearing the screen, `/clear` to clear both, and `/history` to inspect the current context size.
 

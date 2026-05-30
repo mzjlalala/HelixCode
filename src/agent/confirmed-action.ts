@@ -1,5 +1,5 @@
 import type { AgentTurnResult } from './terminal-agent.js';
-import { readFileTool, writeFileTool } from '../tools/filesystem.js';
+import { readFileTool, replaceInFileTool, writeFileTool } from '../tools/filesystem.js';
 import { applyPatchTool } from '../tools/patch.js';
 import { runShellCommand } from '../tools/shell.js';
 import { classifyShellCommand } from '../tools/shell.js';
@@ -13,6 +13,9 @@ export async function previewConfirmedTool(cwd: string, confirmation: Confirmati
   }
   if (confirmation.tool === 'apply_patch') {
     return previewPatch(confirmation);
+  }
+  if (confirmation.tool === 'replace_in_file') {
+    return previewReplaceInFile(cwd, confirmation);
   }
   return previewShell(cwd, confirmation);
 }
@@ -32,6 +35,17 @@ export async function executeConfirmedTool(
 
   if (confirmation.tool === 'apply_patch') {
     return applyPatchTool(cwd, { patch: confirmation.args.patch });
+  }
+
+  if (confirmation.tool === 'replace_in_file') {
+    const result = await replaceInFileTool(cwd, {
+      path: confirmation.args.path,
+      oldText: confirmation.args.oldText,
+      newText: confirmation.args.newText,
+      replaceAll: confirmation.args.replaceAll
+    });
+    if (!result.ok) return result;
+    return { ok: true, output: `Replaced ${result.replacements} match(es) in ${result.path}` };
   }
 
   const command = String(confirmation.args.command ?? '');
@@ -71,6 +85,28 @@ function previewPatch(confirmation: Confirmation): string {
     `Files: ${files.length ? files.join(', ') : 'unknown'}`,
     'Preview:',
     ...previewLines
+  ].join('\n');
+}
+
+async function previewReplaceInFile(cwd: string, confirmation: Confirmation): Promise<string> {
+  const path = String(confirmation.args.path ?? '');
+  const oldText = typeof confirmation.args.oldText === 'string' ? confirmation.args.oldText : '';
+  const newText = typeof confirmation.args.newText === 'string' ? confirmation.args.newText : '';
+  const current = await readFileTool(cwd, { path });
+  const before = current.ok ? current.content : '';
+  const replacements = oldText ? before.split(oldText).length - 1 : 0;
+  const after = oldText
+    ? confirmation.args.replaceAll === true
+      ? before.split(oldText).join(newText)
+      : before.replace(oldText, newText)
+    : before;
+
+  return [
+    'Tool: replace_in_file',
+    `Target: ${path || '(missing path)'}`,
+    `Replacements: ${replacements}`,
+    'Preview:',
+    createCompactTextDiff(before, after)
   ].join('\n');
 }
 

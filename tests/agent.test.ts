@@ -37,6 +37,47 @@ describe('TerminalAgent', () => {
     if (result.type === 'final') expect(result.message).toContain('HelixCode');
   });
 
+  it('includes project instructions in the system prompt', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider(['Done.']);
+    const agent = new TerminalAgent({
+      cwd,
+      provider,
+      projectInstructions: [{ path: 'AGENTS.md', content: 'Use JDK 17 from C:/DevelopTool/JDK17.' }]
+    });
+
+    await agent.run('hello');
+
+    expect(provider.calls[0]?.[0]?.role).toBe('system');
+    expect(provider.calls[0]?.[0]?.content).toContain('Project instructions from AGENTS.md');
+    expect(provider.calls[0]?.[0]?.content).toContain('Use JDK 17 from C:/DevelopTool/JDK17.');
+  });
+
+  it('updates and exposes the current session plan', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({
+        tool: 'update_plan',
+        args: {
+          items: [
+            { step: 'Inspect files', status: 'completed' },
+            { step: 'Implement change', status: 'in_progress' }
+          ]
+        }
+      }),
+      'Plan updated.'
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const result = await agent.run('make a plan');
+
+    expect(result.type).toBe('final');
+    expect(agent.currentPlan()).toEqual([
+      { step: 'Inspect files', status: 'completed' },
+      { step: 'Implement change', status: 'in_progress' }
+    ]);
+  });
+
   it('asks for confirmation before running shell commands', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
     const provider = new ScriptedProvider([
@@ -83,6 +124,25 @@ describe('TerminalAgent', () => {
       expect(result.tool).toBe('write_file');
       const confirmed = await executeConfirmedTool(cwd, result);
       expect(confirmed.ok).toBe(true);
+    }
+  });
+
+  it('asks for confirmation before replacing text in files', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    const provider = new ScriptedProvider([
+      JSON.stringify({
+        tool: 'replace_in_file',
+        args: { path: 'README.md', oldText: 'old', newText: 'new' }
+      })
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const result = await agent.run('edit README');
+
+    expect(result.type).toBe('confirmation');
+    if (result.type === 'confirmation') {
+      expect(result.tool).toBe('replace_in_file');
+      expect(result.args.path).toBe('README.md');
     }
   });
 

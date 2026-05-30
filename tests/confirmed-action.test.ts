@@ -50,6 +50,24 @@ describe('confirmed action previews', () => {
     expect(preview).toContain('+new');
   });
 
+  it('previews replace_in_file actions with a compact diff', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-preview-'));
+    await writeFile(join(cwd, 'README.md'), 'old line\nkept\n', 'utf8');
+
+    const preview = await previewConfirmedTool(cwd, {
+      type: 'confirmation',
+      tool: 'replace_in_file',
+      args: { path: 'README.md', oldText: 'old line', newText: 'new line' },
+      summary: 'Replace text in file: README.md'
+    });
+
+    expect(preview).toContain('Tool: replace_in_file');
+    expect(preview).toContain('Target: README.md');
+    expect(preview).toContain('Replacements: 1');
+    expect(preview).toContain('-old line');
+    expect(preview).toContain('+new line');
+  });
+
   it('previews run_shell actions with working directory and risk', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-preview-'));
 

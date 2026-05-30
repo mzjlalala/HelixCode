@@ -3,12 +3,13 @@ import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesyste
 import { classifyShellCommand } from '../tools/shell.js';
 import type { ChatMessage, ChatProvider } from '../llm/types.js';
 import { parseToolRequest, type ToolRequest } from './tool-request.js';
+import type { ProjectInstruction } from '../core/config.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string }
   | {
       type: 'confirmation';
-      tool: 'run_shell' | 'write_file' | 'apply_patch';
+      tool: 'run_shell' | 'write_file' | 'apply_patch' | 'replace_in_file';
       args: Record<string, unknown>;
       summary: string;
     };
@@ -17,10 +18,22 @@ export type ConfirmedToolResult =
   | { ok: true; output: string }
   | { ok: false; error: string };
 
+export type PlanItemStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface PlanItem {
+  step: string;
+  status: PlanItemStatus;
+}
+
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
+  private readonly plan: PlanItem[] = [];
 
-  constructor(private readonly options: { cwd: string; provider: ChatProvider }) {}
+  constructor(private readonly options: {
+    cwd: string;
+    provider: ChatProvider;
+    projectInstructions?: ProjectInstruction[];
+  }) {}
 
   async run(input: string): Promise<AgentTurnResult> {
     return this.completeTurn([{ role: 'user', content: input }]);
@@ -65,9 +78,13 @@ export class TerminalAgent {
     return this.history.length;
   }
 
+  currentPlan(): PlanItem[] {
+    return this.plan.map((item) => ({ ...item }));
+  }
+
   private async completeTurn(turnMessages: ChatMessage[]): Promise<AgentTurnResult> {
     const messages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt() },
+      { role: 'system', content: systemPrompt(this.options.projectInstructions ?? []) },
       ...this.history,
       ...turnMessages
     ];
@@ -124,12 +141,22 @@ export class TerminalAgent {
         };
       }
 
+      if (request.tool === 'replace_in_file') {
+        this.appendHistory(turnMessages);
+        return {
+          type: 'confirmation',
+          tool: 'replace_in_file',
+          args: request.args ?? {},
+          summary: `Replace text in file: ${String(request.args?.path ?? '')}`
+        };
+      }
+
       const observation = await this.executeTool(request);
       turnMessages.push({ role: 'tool', content: observation });
       messages.splice(
         0,
         messages.length,
-        { role: 'system', content: systemPrompt() },
+        { role: 'system', content: systemPrompt(this.options.projectInstructions ?? []) },
         ...this.history,
         ...turnMessages
       );
@@ -143,10 +170,20 @@ export class TerminalAgent {
     const args = request.args ?? {};
 
     if (request.tool === 'read_file') {
-      return JSON.stringify(await readFileTool(this.options.cwd, { path: args.path }));
+      return JSON.stringify(await readFileTool(this.options.cwd, {
+        path: args.path,
+        startLine: args.startLine,
+        endLine: args.endLine
+      }));
     }
     if (request.tool === 'search_files') {
-      return JSON.stringify(await searchFilesTool(this.options.cwd, { query: args.query }));
+      return JSON.stringify(await searchFilesTool(this.options.cwd, {
+        query: args.query,
+        glob: args.glob,
+        caseSensitive: args.caseSensitive,
+        maxResults: args.maxResults,
+        contextLines: args.contextLines
+      }));
     }
     if (request.tool === 'list_files') {
       return JSON.stringify(await listFilesTool(this.options.cwd));
@@ -157,8 +194,26 @@ export class TerminalAgent {
     if (request.tool === 'git_diff') {
       return await gitDiffTool(this.options.cwd);
     }
+    if (request.tool === 'update_plan') {
+      return JSON.stringify(this.updatePlan(request.args));
+    }
 
     return JSON.stringify({ ok: false, error: `Unknown tool: ${request.tool}` });
+  }
+
+  private updatePlan(args: Record<string, unknown>): { ok: true; plan: PlanItem[] } | { ok: false; error: string } {
+    if (!Array.isArray(args.items)) {
+      return { ok: false, error: 'update_plan requires an items array.' };
+    }
+    const nextPlan: PlanItem[] = [];
+    for (const item of args.items) {
+      if (!isPlanItem(item)) {
+        return { ok: false, error: 'Each plan item requires step and valid status.' };
+      }
+      nextPlan.push({ step: item.step, status: item.status });
+    }
+    this.plan.splice(0, this.plan.length, ...nextPlan);
+    return { ok: true, plan: this.currentPlan() };
   }
 
   private appendHistory(messages: ChatMessage[]): void {
@@ -170,14 +225,33 @@ export class TerminalAgent {
   }
 }
 
-function systemPrompt(): string {
-  return [
+function systemPrompt(projectInstructions: ProjectInstruction[]): string {
+  const lines = [
     'You are HelixCode, a terminal coding agent.',
     'Reply normally when you can answer.',
     'When you need a tool, reply with strict JSON like {"tool":"read_file","args":{"path":"README.md"}}.',
-    'Available safe tools: read_file, list_files, search_files, git_status, git_diff.',
+    'Available safe tools: read_file, list_files, search_files, git_status, git_diff, update_plan.',
+    'Use update_plan with items [{"step":"...","status":"pending|in_progress|completed"}] to track multi-step work.',
+    'read_file accepts optional startLine and endLine. search_files accepts optional glob, caseSensitive, maxResults, and contextLines.',
     'To write a file, use {"tool":"write_file","args":{"path":"path/to/file","content":"new content"}} and wait for user confirmation.',
+    'To replace exact text in a file, use {"tool":"replace_in_file","args":{"path":"path/to/file","oldText":"old","newText":"new"}} and wait for user confirmation. Set replaceAll true only when every match should change.',
     'To edit existing files with a patch, use {"tool":"apply_patch","args":{"patch":"unified diff content"}} and wait for user confirmation.',
     'For shell commands, use {"tool":"run_shell","args":{"command":"npm test"}} and wait for user confirmation.'
-  ].join('\n');
+  ];
+
+  for (const instruction of projectInstructions) {
+    lines.push('', `Project instructions from ${instruction.path}:`, instruction.content.trimEnd());
+  }
+
+  return lines.join('\n');
+}
+
+function isPlanItem(value: unknown): value is PlanItem {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const item = value as { step?: unknown; status?: unknown };
+  return typeof item.step === 'string' && item.step.trim().length > 0 && isPlanStatus(item.status);
+}
+
+function isPlanStatus(value: unknown): value is PlanItemStatus {
+  return value === 'pending' || value === 'in_progress' || value === 'completed';
 }

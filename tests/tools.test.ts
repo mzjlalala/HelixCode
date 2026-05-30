@@ -2,7 +2,12 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { readFileTool, searchFilesTool, writeFileTool } from '../src/tools/filesystem.js';
+import {
+  readFileTool,
+  replaceInFileTool,
+  searchFilesTool,
+  writeFileTool
+} from '../src/tools/filesystem.js';
 import { applyPatchTool } from '../src/tools/patch.js';
 import { classifyShellCommand, runShellCommand } from '../src/tools/shell.js';
 
@@ -10,6 +15,7 @@ async function makeProject(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'helixcode-'));
   await writeFile(join(root, 'README.md'), '# HelixCode\nterminal agent\n', 'utf8');
   await writeFile(join(root, 'index.ts'), 'export const name = "HelixCode";\n', 'utf8');
+  await writeFile(join(root, 'notes.test.ts'), 'HelixCode test helper\n', 'utf8');
   return root;
 }
 
@@ -21,6 +27,16 @@ describe('filesystem tools', () => {
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.content).toContain('terminal agent');
+  });
+
+  it('reads a requested line range', async () => {
+    const cwd = await makeProject();
+    await writeFile(join(cwd, 'lines.txt'), 'one\ntwo\nthree\nfour\n', 'utf8');
+
+    const result = await readFileTool(cwd, { path: 'lines.txt', startLine: 2, endLine: 3 });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.content).toBe('two\nthree\n');
   });
 
   it('rejects path traversal', async () => {
@@ -41,6 +57,30 @@ describe('filesystem tools', () => {
     if (result.ok) expect(result.matches.map((m) => m.path)).toContain('README.md');
   });
 
+  it('searches with glob, case sensitivity, limits, and context lines', async () => {
+    const cwd = await makeProject();
+
+    const result = await searchFilesTool(cwd, {
+      query: 'HelixCode',
+      glob: '*.md',
+      caseSensitive: true,
+      maxResults: 1,
+      contextLines: 1
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0]).toEqual({
+        path: 'README.md',
+        line: 1,
+        text: '# HelixCode',
+        before: [],
+        after: ['terminal agent']
+      });
+    }
+  });
+
   it('writes files inside the project root', async () => {
     const cwd = await makeProject();
 
@@ -52,6 +92,22 @@ describe('filesystem tools', () => {
     expect(result.ok).toBe(true);
     await expect(readFile(join(cwd, 'notes/result.txt'), 'utf8')).resolves.toContain(
       'created by HelixCode'
+    );
+  });
+
+  it('replaces exact text inside a file', async () => {
+    const cwd = await makeProject();
+
+    const result = await replaceInFileTool(cwd, {
+      path: 'README.md',
+      oldText: 'terminal agent',
+      newText: 'terminal coding agent'
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.replacements).toBe(1);
+    await expect(readFile(join(cwd, 'README.md'), 'utf8')).resolves.toContain(
+      'terminal coding agent'
     );
   });
 });
