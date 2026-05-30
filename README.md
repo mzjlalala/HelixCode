@@ -64,3 +64,5 @@ HelixCode can read and search files directly. It asks for confirmation before wr
 The REPL keeps short session context, so the agent can use prior tool observations and confirmed action results while the process is running.
 
 Use `/reset` to clear session context without clearing the screen, `/clear` to clear both, and `/history` to inspect the current context size.
+
+Tool requests are parsed from strict JSON, fenced JSON code blocks, or a balanced JSON object embedded in a short assistant response.

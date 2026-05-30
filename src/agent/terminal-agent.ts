@@ -2,6 +2,7 @@ import { gitDiffTool, gitStatusTool } from '../tools/git.js';
 import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesystem.js';
 import { classifyShellCommand } from '../tools/shell.js';
 import type { ChatMessage, ChatProvider } from '../llm/types.js';
+import { parseToolRequest, type ToolRequest } from './tool-request.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string }
@@ -15,11 +16,6 @@ export type AgentTurnResult =
 export type ConfirmedToolResult =
   | { ok: true; output: string }
   | { ok: false; error: string };
-
-interface ToolRequest {
-  tool: string;
-  args?: Record<string, unknown>;
-}
 
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
@@ -172,18 +168,6 @@ export class TerminalAgent {
       this.history.splice(0, this.history.length - maxMessages);
     }
   }
-}
-
-function parseToolRequest(text: string): ToolRequest | null {
-  try {
-    const parsed = JSON.parse(text) as Partial<ToolRequest>;
-    if (typeof parsed.tool === 'string') {
-      return { tool: parsed.tool, args: parsed.args ?? {} };
-    }
-  } catch {
-    return null;
-  }
-  return null;
 }
 
 function systemPrompt(): string {
