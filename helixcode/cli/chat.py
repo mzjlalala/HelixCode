@@ -91,33 +91,35 @@ class HelixChat:
         """
         self._session.add_message('user', user_input)
 
-        # 1. 从用户输入中提取可能的目标文件/类名，读取并附加上下文
-        code_context = self._gather_context(user_input)
-        if code_context:
-            console.print(f'  [dim]📄 已加载 {len(code_context)} 个相关文件[/]')
+        # 1. 查找相关文件
+        code_context, file_count = self._gather_context(user_input)
+        if file_count > 0:
+            console.print(f'  [dim]📄 已加载 {file_count} 个相关文件[/]')
 
-        # 2. 构建完整上下文
-        enhanced_input = user_input
+        # 2. 构建消息：有文件上下文时放在用户消息里；无上下文时直接用原始输入
         if code_context:
-            enhanced_input = (
+            user_message = (
                 f'{user_input}\n\n'
-                f'--- 相关文件内容 ---\n\n'
-                f'{code_context}\n\n'
-                f'--- 请基于以上文件内容回答 ---'
+                f'--- 项目相关文件 ---\n\n{code_context}'
             )
+        else:
+            user_message = user_input
 
         # 3. 流式输出
         console.print()
-        console.print('[bold green]Helix:[/] ')
+        console.print('[bold green]Helix:[/] ', end='')
 
         history = self._session.get_conversation()
         full_response = ''
 
         try:
+            system_prompt = SYSTEM_PROMPT + f'\n\n当前项目: {self._project_root}'
+            if code_context:
+                system_prompt += '\n用户消息中已附带相关文件内容，请直接分析，不要说找不到文件。'
+
             stream = self._chat.chat_stream(
-                # 传历史记录（不含最后一条，因为刚加的）
                 history[:-1] if len(history) > 1 else [],
-                system=SYSTEM_PROMPT + f'\n\n当前项目: {self._project_root}',
+                system=system_prompt,
             )
 
             # 流式输出，token 级别的实时展示
@@ -131,62 +133,60 @@ class HelixChat:
         except Exception as exc:
             console.print(f'\n[red]错误: {exc}[/]')
 
-    def _gather_context(self, user_input: str) -> str | None:
+    def _gather_context(self, user_input: str) -> tuple[str | None, int]:
         """从用户输入中提取目标，查找文件并读取内容作为上下文。
 
-        识别模式:
-        - 类名: 大写开头的驼峰命名 (如 GitLabWebhookController)
-        - 文件名: 包含扩展名 (如 BugDemo.java, main.py)
-        - 路径: 包含 / (如 src/main/java/...)
+        返回: (上下文字符串, 加载的文件数)
         """
-        # 提取可能的类名
+        # 提取类名: 大写开头驼峰，长度 >= 3
         class_names = re.findall(r'\b([A-Z][a-zA-Z0-9]{2,})\b', user_input)
-
-        # 提取可能的文件名
-        file_names = re.findall(r'([\w./-]+\.(java|py|js|ts|go|rs|cpp|c|h))', user_input)
+        # 提取文件名: 明确包含 .扩展名
+        file_names = re.findall(
+            r'([a-zA-Z0-9_./-]+\.(java|py|js|ts|go|rs|cpp|c|h|md|txt))',
+            user_input,
+        )
         file_names = [f[0] for f in file_names]
 
-        # 合并候选
-        candidates = set()
-        candidates.update(class_names)
-        candidates.update(file_names)
-
+        candidates = set(class_names) | set(file_names)
         if not candidates:
-            return None
+            return None, 0
 
-        # 查找并读取文件
-        loaded = []
+        loaded: list[str] = []
+        loaded_count = 0
+
         for name in candidates:
-            # 跳过太短的名字
             if len(name) < 3:
                 continue
 
-            # 搜索文件
+            # 搜索优先级: 精确路径 > 根目录 > 子目录
             for pattern in [
-                f'**/{name}.java',
+                name,                           # 精确路径
+                f'{name}.java',                 # 根目录 + 扩展名
+                f'{name}.py',
+                f'{name}',
+                f'**/{name}.java',              # 子目录搜索
                 f'**/{name}.py',
-                f'**/{name}.js',
-                f'**/{name}.ts',
-                f'**/{name}',
                 f'**/{name}.*',
             ]:
                 matches = list(self._project_root.glob(pattern))
                 if matches:
-                    for match in matches[:3]:  # 最多 3 个匹配
+                    for match in matches[:3]:
                         try:
-                            content = match.read_text(encoding='utf-8', errors='replace')
-                            # 裁剪大文件
-                            if len(content) > 5000:
-                                content = content[:5000] + '\n... (文件过长已截断)'
+                            content = match.read_text(
+                                encoding='utf-8', errors='replace'
+                            )
+                            if len(content) > 6000:
+                                content = content[:6000] + '\n... (截断)'
                             loaded.append(
-                                f'### 文件: {match.relative_to(self._project_root)}\n'
+                                f'### {match.relative_to(self._project_root)}\n'
                                 f'```\n{content}\n```'
                             )
+                            loaded_count += 1
                         except Exception:
                             pass
-                    break  # 找到匹配就跳出
+                    break  # 找到匹配就跳出 pattern 循环
 
-        return '\n\n'.join(loaded) if loaded else None
+        return ('\n\n'.join(loaded) if loaded else None), loaded_count
 
     def _handle_command(self, cmd: str) -> None:
         """处理内置命令。"""
