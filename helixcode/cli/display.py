@@ -20,11 +20,20 @@ def display_explanation(analysis: dict | None) -> None:
         console.print('[yellow]未能获取分析结果，请确认 API 配置是否正确。[/]')
         return
 
-    summary = analysis.get('summary', '') or analysis.get('target_description', '') or str(analysis)
-    if not summary or summary == '{}':
-        console.print('[yellow]LLM 返回了空结果，请检查 API 连接和模型名称。[/]')
-        console.print(f'[dim]原始返回: {analysis}[/]')
+    # 检查是否所有字段都为空
+    all_empty = all(
+        not v for v in analysis.values()
+        if isinstance(v, (str, list))
+    )
+    if all_empty:
+        console.print('[yellow]LLM 返回了空结果。可能原因:[/]')
+        console.print('  1. 目标文件不在项目中，或路径不正确')
+        console.print('  2. 没有代码索引，且自动文件查找失败')
+        console.print('  3. API 返回了空响应')
+        console.print(f'\n[dim]提示: 试试用完整路径，如 helix explain src/main/java/.../XXX.java[/]')
         return
+
+    summary = analysis.get('summary', '') or analysis.get('target_description', '') or str(analysis)
 
     console.print(Panel(Markdown(summary), title='[bold cyan]代码分析[/]'))
 
