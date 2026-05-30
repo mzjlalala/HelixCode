@@ -30,7 +30,7 @@ const program = new Command();
 program
   .name('helix')
   .description('HelixCode terminal coding agent')
-  .version('0.1.0')
+  .version('0.2.0')
   .option('-C, --cwd <path>', 'Project directory', process.cwd())
   .option('--doctor', 'Show local HelixCode diagnostics and exit')
   .option('-y, --yes', 'Automatically execute confirmed actions in one-shot mode')
