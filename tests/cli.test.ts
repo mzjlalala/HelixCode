@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { handleSlashCommand } from '../src/cli/slash-commands.js';
 import { formatMissingApiKeyMessage, isMainModule } from '../src/cli/main.js';
@@ -94,10 +97,23 @@ describe('slash commands', () => {
 });
 
 describe('CLI entry detection', () => {
-  it('recognizes the bundled entry file on Windows-compatible paths', () => {
+  it('recognizes the bundled entry file on Windows-compatible paths', async () => {
     const file = 'D:/Code/HelixCode/dist/main.js';
 
-    expect(isMainModule(pathToFileURL(file).href, file)).toBe(true);
+    await expect(isMainModule(pathToFileURL(file).href, file)).resolves.toBe(true);
+  });
+
+  it('recognizes globally linked entry shims by real path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'helix-entry-'));
+    const realDir = join(dir, 'real');
+    const linkedDir = join(dir, 'linked');
+    await mkdir(realDir);
+    const target = join(realDir, 'main.js');
+    const linked = join(linkedDir, 'main.js');
+    await writeFile(target, 'console.log("helix")\n', 'utf8');
+    await symlink(realDir, linkedDir, 'junction');
+
+    await expect(isMainModule(pathToFileURL(target).href, linked)).resolves.toBe(true);
   });
 });
 

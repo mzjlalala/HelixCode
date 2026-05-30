@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
+import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadProjectInstructions } from '../core/config.js';
@@ -170,11 +171,18 @@ async function readAllStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export function isMainModule(metaUrl: string, argvPath: string | undefined): boolean {
+export async function isMainModule(metaUrl: string, argvPath: string | undefined): Promise<boolean> {
   if (!argvPath) return false;
-  return resolve(fileURLToPath(metaUrl)) === resolve(argvPath);
+  const modulePath = resolve(fileURLToPath(metaUrl));
+  const entryPath = resolve(argvPath);
+  if (modulePath === entryPath) return true;
+  try {
+    return await realpath(modulePath) === await realpath(entryPath);
+  } catch {
+    return false;
+  }
 }
 
-if (isMainModule(import.meta.url, process.argv[1])) {
+if (await isMainModule(import.meta.url, process.argv[1])) {
   await program.parseAsync(process.argv);
 }
