@@ -23,6 +23,10 @@ class PlannerNode:
 
     async def execute(self, state: AgentState) -> AgentState:
         """分析任务并生成执行计划。"""
+        from rich.console import Console
+        console = Console()
+        console.print('  [dim]🧠 Planner 正在拆解任务...[/]')
+
         task = state.get('task', '')
         command = state.get('command', '')
 

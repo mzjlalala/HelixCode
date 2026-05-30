@@ -23,12 +23,12 @@ async def _run_explain(target: str, project_root: str | None) -> None:
         command='explain',
     )
 
+    analysis = result.get('analysis') or {}
+
     if result.get('errors'):
         for err in result['errors']:
             display_error(err)
-        return
 
-    analysis = result.get('analysis', {})
     display_explanation(analysis)
 
 

@@ -25,6 +25,8 @@ class ExecutorNode:
 
     async def execute(self, state: AgentState) -> AgentState:
         """根据计划和上下文生成代码变更。"""
+        from rich.console import Console
+        Console().print('  [dim]🔧 Executor 正在生成变更...[/]')
         task = state.get('task', '')
         command = state.get('command', '')
         plan = state.get('plan', [])

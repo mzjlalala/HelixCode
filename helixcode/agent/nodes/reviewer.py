@@ -26,6 +26,8 @@ class ReviewerNode:
 
     async def execute(self, state: AgentState) -> AgentState:
         """审查流水线的输出，生成质量报告。"""
+        from rich.console import Console
+        Console().print('  [dim]✅ Reviewer 正在审查结果...[/]')
         command = state.get('command', '')
         diffs = state.get('diffs', [])
         analysis = state.get('analysis', {})

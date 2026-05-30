@@ -20,6 +20,8 @@ class SearcherNode:
 
     async def execute(self, state: AgentState) -> AgentState:
         """根据任务和执行计划搜索相关代码。"""
+        from rich.console import Console
+        Console().print('  [dim]🔍 Searcher 正在搜索代码库...[/]')
         task = state.get('task', '')
         plan = state.get('plan', [])
 

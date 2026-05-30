@@ -24,6 +24,8 @@ class AnalyzerNode:
 
     async def execute(self, state: AgentState) -> AgentState:
         """分析搜索结果，生成结构化的代码分析报告。"""
+        from rich.console import Console
+        Console().print('  [dim]📊 Analyzer 正在分析代码...[/]')
         task = state.get('task', '')
         search_results = state.get('search_results', [])
         command = state.get('command', '')

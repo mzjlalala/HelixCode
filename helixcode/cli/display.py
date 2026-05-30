@@ -14,9 +14,18 @@ from rich.markdown import Markdown
 console = Console()
 
 
-def display_explanation(analysis: dict) -> None:
+def display_explanation(analysis: dict | None) -> None:
     """格式化显示代码分析结果（explain 命令）。"""
-    summary = analysis.get('summary', '无分析结果')
+    if not analysis:
+        console.print('[yellow]未能获取分析结果，请确认 API 配置是否正确。[/]')
+        return
+
+    summary = analysis.get('summary', '') or analysis.get('target_description', '') or str(analysis)
+    if not summary or summary == '{}':
+        console.print('[yellow]LLM 返回了空结果，请检查 API 连接和模型名称。[/]')
+        console.print(f'[dim]原始返回: {analysis}[/]')
+        return
+
     console.print(Panel(Markdown(summary), title='[bold cyan]代码分析[/]'))
 
     call_chain = analysis.get('call_chain', [])
