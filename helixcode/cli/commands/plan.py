@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 
 from helixcode.cli.display import console, display_error, display_plan
 from helixcode.cli.utils import load_settings, validate_api_key
@@ -28,6 +29,17 @@ async def _run_plan(task: str, project_root: str | None) -> None:
     display_plan(plan_steps)
 
 
+def _run_async(coro):
+    """安全地运行异步协程，兼容已有事件循环的场景。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+    else:
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            pool.submit(asyncio.run, coro).result()
+
+
 def plan(task: str, project_root: str | None = None) -> None:
     """为任务生成结构化的执行计划。
 
@@ -37,4 +49,7 @@ def plan(task: str, project_root: str | None = None) -> None:
     示例:
         helix plan "增加导出功能"
     """
-    asyncio.run(_run_plan(task, project_root))
+    try:
+        _run_async(_run_plan(task, project_root))
+    except Exception as exc:
+        display_error(str(exc))

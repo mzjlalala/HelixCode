@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 
 from helixcode.cli.display import console, display_explanation, display_error
 from helixcode.cli.utils import load_settings, validate_api_key
@@ -31,6 +32,17 @@ async def _run_explain(target: str, project_root: str | None) -> None:
     display_explanation(analysis)
 
 
+def _run_async(coro):
+    """安全地运行异步协程，兼容已有事件循环的场景。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+    else:
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            pool.submit(asyncio.run, coro).result()
+
+
 def explain(target: str, project_root: str | None = None) -> None:
     """分析目标代码的调用链和功能。
 
@@ -38,4 +50,7 @@ def explain(target: str, project_root: str | None = None) -> None:
         helix explain OrderService
         helix explain src/services/order.py --project-root /path/to/project
     """
-    asyncio.run(_run_explain(target, project_root))
+    try:
+        _run_async(_run_explain(target, project_root))
+    except Exception as exc:
+        display_error(str(exc))

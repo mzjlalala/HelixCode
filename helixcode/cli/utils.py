@@ -31,13 +31,11 @@ def resolve_project_path(project_root: str) -> Path:
 
 
 def validate_api_key(settings: Settings) -> None:
-    """验证是否配置了 OpenAI API Key。
-
-    如果未设置，给出友好的提示信息。
-    """
+    """验证是否配置了 API Key，未设置则直接中断并提示。"""
     if not settings.llm.api_key:
-        print(
-            '⚠️  未设置 API Key。\n'
+        from helixcode.core.exceptions import ConfigurationError
+        raise ConfigurationError(
+            '未设置 API Key。\n'
             '请设置环境变量 HELIX_API_KEY，或创建 .env 文件：\n'
             '  echo HELIX_API_KEY=sk-xxx > .env\n'
             '\n'

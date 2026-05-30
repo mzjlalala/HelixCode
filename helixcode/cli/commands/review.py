@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 
 from helixcode.cli.display import console, display_error, display_review
 from helixcode.cli.utils import load_settings, validate_api_key
@@ -30,11 +31,9 @@ async def _run_review(
             display_error(err)
         return
 
-    # review 命令的结果可能直接是问题列表
     review_data = result.get('review', {})
     problems = review_data.get('problems', [])
 
-    # 如果 Executor 生成了问题列表
     diffs = result.get('diffs', [])
     if diffs and not problems:
         for d in diffs:
@@ -51,6 +50,17 @@ async def _run_review(
     display_review(problems)
 
 
+def _run_async(coro):
+    """安全地运行异步协程，兼容已有事件循环的场景。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+    else:
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            pool.submit(asyncio.run, coro).result()
+
+
 def review(
     staged: bool = False, project_root: str | None = None
 ) -> None:
@@ -60,4 +70,7 @@ def review(
         helix review
         helix review --staged
     """
-    asyncio.run(_run_review(staged, project_root))
+    try:
+        _run_async(_run_review(staged, project_root))
+    except Exception as exc:
+        display_error(str(exc))
