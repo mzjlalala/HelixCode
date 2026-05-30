@@ -88,6 +88,8 @@ async function handleInputLine(
   const slash = handleSlashCommand(line, {
     cwd: context.config.cwd,
     model: context.runtime.model,
+    baseURL: context.config.baseURL,
+    apiKeyConfigured: Boolean(context.config.apiKey.trim()),
     historyMessages: context.agent.historySize(),
     projectInstructions: context.projectInstructions.map((item) => item.path),
     planItems: context.agent.currentPlan(),

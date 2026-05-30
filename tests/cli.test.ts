@@ -52,6 +52,27 @@ describe('slash commands', () => {
     }
   });
 
+  it('renders doctor diagnostics from context', () => {
+    const result = handleSlashCommand('/doctor', {
+      cwd: 'D:/Code/HelixCode',
+      model: 'gpt-test',
+      apiKeyConfigured: true,
+      baseURL: 'https://example.test/v1',
+      projectInstructions: ['AGENTS.md'],
+      historyMessages: 3,
+      planItems: [{ step: 'Check state', status: 'completed' }]
+    });
+
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.output).toContain('HelixCode doctor:');
+      expect(result.output).toContain('cwd: D:/Code/HelixCode');
+      expect(result.output).toContain('model: gpt-test');
+      expect(result.output).toContain('api key: set');
+      expect(result.output).toContain('project instructions: AGENTS.md');
+    }
+  });
+
   it('renders history count from context', () => {
     const result = handleSlashCommand('/history', { historyMessages: 7 });
 

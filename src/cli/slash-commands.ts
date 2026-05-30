@@ -15,6 +15,8 @@ export type SlashCommandResult =
 export interface SlashCommandContext {
   cwd?: string;
   model?: string;
+  baseURL?: string;
+  apiKeyConfigured?: boolean;
   historyMessages?: number;
   projectInstructions?: string[];
   planItems?: PlanItem[];
@@ -38,6 +40,7 @@ export function handleSlashCommand(
         'HelixCode commands:',
         '/help    Show this help',
         '/status  Show current project, model, and session state',
+        '/doctor  Show local HelixCode diagnostics',
         '/model   Show or switch the current chat model',
         '/history Show current session history size',
         '/plan    Show current session plan',
@@ -60,6 +63,15 @@ export function handleSlashCommand(
       exit: false,
       clear: false,
       output: `Current model: ${context.model ?? 'unknown'}`
+    };
+  }
+
+  if (command === '/doctor') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      output: formatDoctor(context)
     };
   }
 
@@ -165,4 +177,18 @@ function formatPlan(items: PlanItem[]): string {
     completed: 'done'
   };
   return ['Current plan:', ...items.map((item) => `[${labels[item.status]}] ${item.step}`)].join('\n');
+}
+
+function formatDoctor(context: SlashCommandContext): string {
+  return [
+    'HelixCode doctor:',
+    `cwd: ${context.cwd ?? process.cwd()}`,
+    `model: ${context.model ?? 'unknown'}`,
+    `base URL: ${context.baseURL ?? 'unknown'}`,
+    `api key: ${context.apiKeyConfigured ? 'set' : 'missing'}`,
+    `node: ${process.version}`,
+    `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`,
+    `history messages: ${context.historyMessages ?? 0}`,
+    `plan items: ${context.planItems?.length ?? 0}`
+  ].join('\n');
 }

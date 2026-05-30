@@ -54,6 +54,7 @@ Useful slash commands:
 ```text
 /help
 /status
+/doctor
 /model
 /history
 /plan
@@ -94,11 +95,13 @@ use `/plan` to inspect it during the current session.
 `contextLines` fields. Prefer `replace_in_file` for small exact edits; it shows
 a confirmation preview before changing the target file.
 
-Use `/model` to inspect the active chat model or `/model <name>` to switch it
-for the current session. Use `/reset` to clear session context without clearing
-the screen, `/compact` to keep only the most recent session messages, `/clear`
-to clear both the screen and session context, and `/history` to inspect the
-current context size.
+Use `/doctor` to inspect local runtime diagnostics, including cwd, model, base
+URL, API key status, Node version, project instructions, history size, and plan
+item count. Use `/model` to inspect the active chat model or `/model <name>` to
+switch it for the current session. Use `/reset` to clear session context without
+clearing the screen, `/compact` to keep only the most recent session messages,
+`/clear` to clear both the screen and session context, and `/history` to inspect
+the current context size.
 
 Tool requests are parsed from strict JSON, fenced JSON code blocks, or a balanced JSON object embedded in a short assistant response.
 
