@@ -62,6 +62,7 @@ let currentAbort: AbortController | null = null;
 
 // Simple spinner on stderr — returns stop() that clears the line
 let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+let streamedThisTurn = false;
 
 function startSpinner(): void {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -203,6 +204,7 @@ async function handleInputLine(
   const abort = new AbortController();
   currentAbort = abort;
   startSpinner();
+  streamedThisTurn = false;
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
     if (result.type === 'final' && abort.signal.aborted) {
@@ -227,7 +229,10 @@ async function handleAgentResult(
   }
 ): Promise<void> {
   if (result.type === 'final') {
-    output.write(`${result.message}\n`);
+    if (!streamedThisTurn) {
+      output.write(`${result.message}\n`);
+    }
+    streamedThisTurn = false;
     return;
   }
 
@@ -299,6 +304,7 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     projectInstructions,
     onToken: (token) => {
       stopSpinner();
+      streamedThisTurn = true;
       output.write(token);
     }
   });
