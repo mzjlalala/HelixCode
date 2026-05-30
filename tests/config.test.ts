@@ -35,6 +35,21 @@ describe('loadConfig', () => {
     expect(config.model).toBe('custom-model');
     expect(config.baseURL).toBe('https://example.test/v1');
   });
+
+  it('uses DeepSeek defaults when HELIX_PROVIDER is deepseek', () => {
+    process.env.HELIX_PROVIDER = 'deepseek';
+    process.env.DEEPSEEK_API_KEY = 'deepseek-key';
+    delete process.env.HELIX_CHAT_MODEL;
+    delete process.env.HELIX_MODEL;
+    delete process.env.HELIX_BASE_URL;
+
+    const config = loadConfig({ cwd: 'D:/work/repo' });
+
+    expect(config.provider).toBe('deepseek');
+    expect(config.apiKey).toBe('deepseek-key');
+    expect(config.model).toBe('deepseek-chat');
+    expect(config.baseURL).toBe('https://api.deepseek.com');
+  });
 });
 
 describe('loadProjectInstructions', () => {

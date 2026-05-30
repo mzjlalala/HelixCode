@@ -110,6 +110,23 @@ describe('filesystem tools', () => {
       'terminal coding agent'
     );
   });
+
+  it('explains missing replace text with recovery guidance', async () => {
+    const cwd = await makeProject();
+
+    const result = await replaceInFileTool(cwd, {
+      path: 'README.md',
+      oldText: 'missing phrase',
+      newText: 'replacement'
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('README.md');
+      expect(result.error).toContain('missing phrase');
+      expect(result.error).toMatch(/whitespace\/casing|read the file again/i);
+    }
+  });
 });
 
 describe('patch tools', () => {

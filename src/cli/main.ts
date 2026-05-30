@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, loadProjectInstructions } from '../core/config.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
-import { handleSlashCommand } from './slash-commands.js';
+import { formatDoctor, handleSlashCommand } from './slash-commands.js';
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
 
@@ -19,7 +19,12 @@ program
   .description('HelixCode terminal coding agent')
   .version('0.1.0')
   .option('-C, --cwd <path>', 'Project directory', process.cwd())
-  .action(async (options: { cwd: string }) => {
+  .option('--doctor', 'Show local HelixCode diagnostics and exit')
+  .action(async (options: { cwd: string; doctor?: boolean }) => {
+    if (options.doctor) {
+      output.write(`${await createDoctorOutput(options.cwd)}\n`);
+      return;
+    }
     await runRepl(options.cwd);
   });
 
@@ -163,6 +168,20 @@ export function formatMissingApiKeyMessage(): string {
     '$env:HELIX_API_KEY="your-api-key"',
     'OPENAI_API_KEY is also accepted as a fallback.'
   ].join('\n');
+}
+
+export async function createDoctorOutput(cwd: string): Promise<string> {
+  const config = loadConfig({ cwd });
+  const projectInstructions = await loadProjectInstructions(config.cwd);
+  return formatDoctor({
+    cwd: config.cwd,
+    model: config.model,
+    baseURL: config.baseURL,
+    apiKeyConfigured: Boolean(config.apiKey.trim()),
+    historyMessages: 0,
+    projectInstructions: projectInstructions.map((item) => item.path),
+    planItems: []
+  });
 }
 
 async function readAllStdin(): Promise<string> {

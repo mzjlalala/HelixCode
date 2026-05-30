@@ -91,7 +91,12 @@ export async function replaceInFileTool(
   if (!current.ok) return { ok: false, error: current.error };
 
   const matches = countOccurrences(current.content, args.oldText);
-  if (matches === 0) return { ok: false, error: 'oldText was not found in the target file.' };
+  if (matches === 0) {
+    return {
+      ok: false,
+      error: `Text to replace was not found in ${args.path}: ${JSON.stringify(args.oldText)}. Check exact whitespace/casing or read the file again before retrying.`
+    };
+  }
   if (matches > 1 && args.replaceAll !== true) {
     return { ok: false, error: `oldText matched ${matches} times. Set replaceAll to true to replace all matches.` };
   }

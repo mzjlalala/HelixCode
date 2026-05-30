@@ -9,15 +9,34 @@ HelixCode is a terminal coding agent inspired by Claude Code. Run `helix` in a r
 
 ## Configuration
 
-Set these environment variables:
+Set these environment variables for OpenAI-compatible providers.
+
+OpenAI:
 
 ```powershell
-$env:HELIX_API_KEY="your-api-key"
-$env:HELIX_BASE_URL="https://api.openai.com/v1"
+$env:HELIX_PROVIDER="openai"
+$env:OPENAI_API_KEY="your-openai-key"
 $env:HELIX_CHAT_MODEL="gpt-4o"
 ```
 
-`OPENAI_API_KEY` is also accepted as a fallback for `HELIX_API_KEY`.
+DeepSeek:
+
+```powershell
+$env:HELIX_PROVIDER="deepseek"
+$env:DEEPSEEK_API_KEY="your-deepseek-key"
+$env:HELIX_CHAT_MODEL="deepseek-chat"
+```
+
+Custom OpenAI-compatible endpoint:
+
+```powershell
+$env:HELIX_PROVIDER="custom"
+$env:HELIX_API_KEY="your-api-key"
+$env:HELIX_BASE_URL="https://your-provider.example/v1"
+$env:HELIX_CHAT_MODEL="your-model"
+```
+
+`HELIX_API_KEY`, `DEEPSEEK_API_KEY`, and `OPENAI_API_KEY` are supported. `HELIX_API_KEY` is the generic override.
 
 ## Development
 
@@ -41,7 +60,7 @@ For local development without installing the CLI globally:
 npm run dev -- --cwd .
 ```
 
-If neither `HELIX_API_KEY` nor `OPENAI_API_KEY` is set, HelixCode exits before
+If no supported API key is set, HelixCode exits before
 starting the REPL and prints a short setup hint. `helix --help` still works
 without an API key.
 
@@ -97,13 +116,20 @@ a confirmation preview before changing the target file.
 
 Use `/doctor` to inspect local runtime diagnostics, including cwd, model, base
 URL, API key status, Node version, project instructions, history size, and plan
-item count. Use `/model` to inspect the active chat model or `/model <name>` to
-switch it for the current session. Use `/reset` to clear session context without
+item count. Use `helix --doctor` to print the same diagnostics without starting
+the REPL or requiring an API key. Use `/model` to inspect the active chat model
+or `/model <name>` to switch it for the current session. Use `/reset` to clear session context without
 clearing the screen, `/compact` to keep only the most recent session messages,
 `/clear` to clear both the screen and session context, and `/history` to inspect
 the current context size.
 
 Tool requests are parsed from strict JSON, fenced JSON code blocks, or a balanced JSON object embedded in a short assistant response.
+
+## MVP Boundaries
+
+HelixCode currently uses a JSON tool protocol with an OpenAI-compatible chat API.
+It does not yet implement native model tool calling, MCP, persistent task
+storage, or a plugin system.
 
 ## Validation
 
@@ -114,6 +140,7 @@ npm run typecheck
 npm test
 npm run build
 npx tsx src\cli\main.ts --help
+npx tsx src\cli\main.ts --doctor
 ```
 
 The npm package includes the built `dist` directory, so run `npm run build`

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { handleSlashCommand } from '../src/cli/slash-commands.js';
-import { formatMissingApiKeyMessage, isMainModule } from '../src/cli/main.js';
+import { createDoctorOutput, formatMissingApiKeyMessage, isMainModule } from '../src/cli/main.js';
 
 describe('slash commands', () => {
   it('renders help', () => {
@@ -107,12 +107,15 @@ describe('slash commands', () => {
   });
 
   it('recognizes compact as a history-compacting command', () => {
-    const result = handleSlashCommand('/compact', { compactedHistoryMessages: 20 });
+    const result = handleSlashCommand('/compact', {
+      historyMessages: 42,
+      compactedHistoryMessages: 20
+    });
 
     expect(result.handled).toBe(true);
     if (result.handled) {
       expect(result.compact).toBe(true);
-      expect(result.output).toBe('Session history compacted to 20 messages.');
+      expect(result.output).toBe('Session history compacted from 42 to 20 messages.');
     }
   });
 });
@@ -145,5 +148,32 @@ describe('CLI configuration guidance', () => {
     expect(message).toContain('HELIX_API_KEY is not set');
     expect(message).toContain('$env:HELIX_API_KEY');
     expect(message).toContain('OPENAI_API_KEY');
+  });
+
+  it('renders doctor output without requiring an API key', async () => {
+    const previousHelixKey = process.env.HELIX_API_KEY;
+    const previousOpenAIKey = process.env.OPENAI_API_KEY;
+    const previousDeepSeekKey = process.env.DEEPSEEK_API_KEY;
+    delete process.env.HELIX_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.DEEPSEEK_API_KEY;
+
+    try {
+      const output = await createDoctorOutput(process.cwd());
+
+      expect(output).toContain('HelixCode doctor:');
+      expect(output).toContain('cwd:');
+      expect(output).toContain('model:');
+      expect(output).toContain('base URL:');
+      expect(output).toContain('api key: missing');
+      expect(output).toContain('node:');
+    } finally {
+      if (previousHelixKey === undefined) delete process.env.HELIX_API_KEY;
+      else process.env.HELIX_API_KEY = previousHelixKey;
+      if (previousOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousOpenAIKey;
+      if (previousDeepSeekKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = previousDeepSeekKey;
+    }
   });
 });

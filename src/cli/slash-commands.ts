@@ -100,12 +100,15 @@ export function handleSlashCommand(
   }
 
   if (command === '/compact') {
+    const before = context.historyMessages ?? 0;
+    const keep = context.compactedHistoryMessages ?? 20;
+    const after = Math.min(before, keep);
     return {
       handled: true,
       exit: false,
       clear: false,
       compact: true,
-      output: `Session history compacted to ${context.compactedHistoryMessages ?? 20} messages.`
+      output: `Session history compacted from ${before} to ${after} messages.`
     };
   }
 
@@ -179,7 +182,7 @@ function formatPlan(items: PlanItem[]): string {
   return ['Current plan:', ...items.map((item) => `[${labels[item.status]}] ${item.step}`)].join('\n');
 }
 
-function formatDoctor(context: SlashCommandContext): string {
+export function formatDoctor(context: SlashCommandContext): string {
   return [
     'HelixCode doctor:',
     `cwd: ${context.cwd ?? process.cwd()}`,
