@@ -1,4 +1,4 @@
-﻿import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { OpenAIChatProvider } from '../src/llm/openai-provider.js';
 import type { HelixConfig } from '../src/core/config.js';
 
@@ -32,17 +32,17 @@ describe('OpenAIChatProvider', () => {
     const result = await provider.complete([
       { role: 'system', content: 'You are HelixCode.' },
       { role: 'user', content: 'Hi' },
-      { role: 'tool', content: '{"ok":true}' }
+      { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' }
     ]);
 
-    expect(result).toBe('hello from model');
+    expect(result).toEqual({ type: 'text', content: 'hello from model' });
     expect(calls).toEqual([
       {
         model: 'deepseek-reasoner',
         messages: [
           { role: 'system', content: 'You are HelixCode.' },
           { role: 'user', content: 'Hi' },
-          { role: 'user', content: 'Tool observation:\n{"ok":true}' }
+          { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' }
         ],
         temperature: 0.2
       }
@@ -63,9 +63,12 @@ describe('OpenAIChatProvider', () => {
 
     const result = await provider.complete([{ role: 'user', content: 'Hi' }]);
 
-    expect(result).toContain('Model request failed');
-    expect(result).toContain('deepseek');
-    expect(result).toContain('deepseek-chat');
-    expect(result).toContain('401 invalid api key');
+    expect(result.type).toBe('text');
+    if (result.type === 'text') {
+      expect(result.content).toContain('Model request failed');
+      expect(result.content).toContain('deepseek');
+      expect(result.content).toContain('deepseek-chat');
+      expect(result.content).toContain('401 invalid api key');
+    }
   });
 });

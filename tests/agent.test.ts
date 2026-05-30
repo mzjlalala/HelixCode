@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { buildSystemPrompt, TerminalAgent } from '../src/agent/terminal-agent.js';
 import { executeConfirmedTool } from '../src/agent/confirmed-action.js';
-import type { ChatMessage, ChatProvider } from '../src/llm/types.js';
+import type { ChatMessage, ChatProvider, ChatResult } from '../src/llm/types.js';
 
 class ScriptedProvider implements ChatProvider {
   private index = 0;
@@ -12,13 +12,33 @@ class ScriptedProvider implements ChatProvider {
 
   constructor(private readonly responses: string[]) {}
 
-  async complete(messages: ChatMessage[]): Promise<string> {
-    this.calls.push(messages);
+  async complete(_messages: ChatMessage[], _tools?: unknown[]): Promise<ChatResult> {
+    this.calls.push(_messages);
     const response = this.responses[this.index];
     this.index += 1;
     if (response === undefined) throw new Error('No scripted response left');
-    return response;
+
+    // If response looks like a JSON tool call, return as native tool_calls
+    try {
+      const parsed = JSON.parse(response) as { tool?: unknown; args?: unknown };
+      if (typeof parsed.tool === 'string') {
+        return {
+          type: 'tool_calls',
+          calls: [{
+            id: `call_${this.index}`,
+            name: parsed.tool,
+            arguments: isPlainObject(parsed.args) ? parsed.args as Record<string, unknown> : {}
+          }]
+        };
+      }
+    } catch { /* not JSON — treat as text */ }
+
+    return { type: 'text', content: response };
   }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 describe('TerminalAgent', () => {  it('guides the model through a coding-agent tool workflow', () => {
@@ -27,7 +47,7 @@ describe('TerminalAgent', () => {  it('guides the model through a coding-agent t
     expect(prompt).toContain('Before editing, inspect the relevant files');
     expect(prompt).toContain('Prefer search_files');
     expect(prompt).toContain('After changing code, run the smallest relevant verification command');
-    expect(prompt).toContain('Reply with exactly one JSON object when calling a tool');
+    expect(prompt).toContain('Use the provided tools');
   });
 
   it('executes a safe read_file tool call and returns a final response', async () => {

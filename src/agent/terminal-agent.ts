@@ -1,17 +1,18 @@
 import { gitDiffTool, gitStatusTool } from '../tools/git.js';
 import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesystem.js';
 import { classifyShellCommand } from '../tools/shell.js';
-import type { ChatMessage, ChatProvider } from '../llm/types.js';
-import { parseToolRequest, type ToolRequest } from './tool-request.js';
+import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '../llm/types.js';
+import { parseToolRequest } from './tool-request.js';
 import type { ProjectInstruction } from '../core/config.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string }
   | {
       type: 'confirmation';
-      tool: 'run_shell' | 'write_file' | 'apply_patch' | 'replace_in_file' | 'edit_file';
+      tool: string;
       args: Record<string, unknown>;
       summary: string;
+      tool_call_id: string;
     };
 
 export type ConfirmedToolResult =
@@ -24,6 +25,142 @@ export interface PlanItem {
   step: string;
   status: PlanItemStatus;
 }
+
+const TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    name: 'read_file',
+    description: 'Read a project file, optionally by line range',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to project root' },
+        startLine: { type: 'number', description: 'Optional start line (1-based)' },
+        endLine: { type: 'number', description: 'Optional end line (inclusive)' }
+      },
+      required: ['path']
+    }
+  },
+  {
+    name: 'search_files',
+    description: 'Search file contents with optional glob, case sensitivity, result limits, and context lines',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Text to search for' },
+        glob: { type: 'string', description: 'Optional glob pattern (e.g. *.ts)' },
+        caseSensitive: { type: 'boolean', description: 'Case sensitive search' },
+        maxResults: { type: 'number', description: 'Maximum results to return' },
+        contextLines: { type: 'number', description: 'Lines of context around each match' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'list_files',
+    description: 'List all project files (excluding .git, node_modules, dist)',
+    parameters: { type: 'object', properties: {} }
+  },
+  {
+    name: 'git_status',
+    description: 'Show git working tree status',
+    parameters: { type: 'object', properties: {} }
+  },
+  {
+    name: 'git_diff',
+    description: 'Show git diff (unstaged changes)',
+    parameters: { type: 'object', properties: {} }
+  },
+  {
+    name: 'update_plan',
+    description: 'Track multi-step work by setting plan items with pending/in_progress/completed status',
+    parameters: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              step: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] }
+            },
+            required: ['step', 'status']
+          }
+        }
+      },
+      required: ['items']
+    }
+  },
+  {
+    name: 'write_file',
+    description: 'Write content to a file (requires user confirmation)',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path relative to project root' },
+        content: { type: 'string', description: 'File content to write' }
+      },
+      required: ['path', 'content']
+    },
+    confirm: true
+  },
+  {
+    name: 'replace_in_file',
+    description: 'Replace exact text in a file (requires user confirmation)',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path' },
+        oldText: { type: 'string', description: 'Exact text to replace' },
+        newText: { type: 'string', description: 'Replacement text' },
+        replaceAll: { type: 'boolean', description: 'Replace all occurrences' }
+      },
+      required: ['path', 'oldText', 'newText']
+    },
+    confirm: true
+  },
+  {
+    name: 'edit_file',
+    description: 'Replace an inclusive line range in a file (requires user confirmation)',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        startLine: { type: 'number' },
+        endLine: { type: 'number' },
+        content: { type: 'string', description: 'New content for the specified line range' }
+      },
+      required: ['path', 'startLine', 'endLine', 'content']
+    },
+    confirm: true
+  },
+  {
+    name: 'apply_patch',
+    description: 'Apply a unified diff patch to project files (requires user confirmation)',
+    parameters: {
+      type: 'object',
+      properties: {
+        patch: { type: 'string', description: 'Unified diff content' }
+      },
+      required: ['patch']
+    },
+    confirm: true
+  },
+  {
+    name: 'run_shell',
+    description: 'Run a shell command in the project directory (requires user confirmation)',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to execute' }
+      },
+      required: ['command']
+    },
+    confirm: true
+  }
+];
+
+const CONFIRMED_TOOLS = new Set(TOOL_DEFINITIONS.filter((t) => t.confirm).map((t) => t.name));
 
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
@@ -51,7 +188,8 @@ export class TerminalAgent {
           confirmedTool: confirmation.tool,
           args: confirmation.args,
           result
-        })
+        }),
+        tool_call_id: confirmation.tool_call_id
       }
     ]);
   }
@@ -66,7 +204,8 @@ export class TerminalAgent {
           confirmedTool: confirmation.tool,
           args: confirmation.args,
           result: { ok: false, error: 'User skipped this action.' }
-        })
+        }),
+        tool_call_id: confirmation.tool_call_id
       }
     ]);
   }
@@ -99,79 +238,106 @@ export class TerminalAgent {
     ];
 
     for (let i = 0; i < 6; i += 1) {
-      const response = await this.getLLMResponse(messages, streamFirst && i === 0, signal);
-      const request = parseToolRequest(response);
+      const result = await this.getLLMResponse(messages, streamFirst && i === 0, signal);
 
-      if (!request) {
-        turnMessages.push({ role: 'assistant', content: response });
-        this.appendHistory(turnMessages);
-        return { type: 'final', message: response };
-      }
+      // Native tool calls from the provider
+      if (result.type === 'tool_calls') {
+        for (const call of result.calls) {
+          turnMessages.push({
+            role: 'assistant',
+            content: null,
+            tool_calls: [call]
+          });
 
-      turnMessages.push({ role: 'assistant', content: response });
+          if (call.name === 'run_shell') {
+            const command = String(call.arguments.command ?? '').trim();
+            const risk = classifyShellCommand(command);
+            if (risk.risk === 'blocked') {
+              turnMessages.push({
+                role: 'tool',
+                content: JSON.stringify({ ok: false, error: risk.reason ?? 'Command blocked.' }),
+                tool_call_id: call.id
+              });
+              this.appendHistory(turnMessages);
+              return { type: 'final', message: risk.reason ?? 'Command blocked.' };
+            }
+            this.appendHistory(turnMessages);
+            return {
+              type: 'confirmation',
+              tool: 'run_shell',
+              args: { command },
+              summary: `Run shell command: ${command}`,
+              tool_call_id: call.id
+            };
+          }
 
-      if (request.tool === 'run_shell') {
-        const command = String(request.args?.command ?? '').trim();
-        const risk = classifyShellCommand(command);
-        if (risk.risk === 'blocked') {
+          if (CONFIRMED_TOOLS.has(call.name)) {
+            this.appendHistory(turnMessages);
+            return {
+              type: 'confirmation',
+              tool: call.name,
+              args: call.arguments,
+              summary: summaryForTool(call),
+              tool_call_id: call.id
+            };
+          }
+
+          // Safe tool — execute inline
+          const observation = await this.executeTool(call);
           turnMessages.push({
             role: 'tool',
-            content: JSON.stringify({ ok: false, error: risk.reason ?? 'Command blocked.' })
+            content: observation,
+            tool_call_id: call.id
           });
-          this.appendHistory(turnMessages);
-          return { type: 'final', message: risk.reason ?? 'Command blocked.' };
+        }
+
+        // Rebuild messages for next iteration
+        messages.splice(
+          0,
+          messages.length,
+          { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
+          ...this.history,
+          ...turnMessages
+        );
+        continue;
+      }
+
+      // Text response — check for fallback JSON tool request
+      const request = parseToolRequest(result.content);
+      if (!request) {
+        turnMessages.push({ role: 'assistant', content: result.content });
+        this.appendHistory(turnMessages);
+        return { type: 'final', message: result.content };
+      }
+
+      // Legacy JSON protocol fallback (for models that don't support tool calling well)
+      turnMessages.push({ role: 'assistant', content: result.content });
+
+      if (CONFIRMED_TOOLS.has(request.tool)) {
+        if (request.tool === 'run_shell') {
+          const command = String(request.args?.command ?? '').trim();
+          const risk = classifyShellCommand(command);
+          if (risk.risk === 'blocked') {
+            turnMessages.push({
+              role: 'tool',
+              content: JSON.stringify({ ok: false, error: risk.reason ?? 'Command blocked.' })
+            });
+            this.appendHistory(turnMessages);
+            return { type: 'final', message: risk.reason ?? 'Command blocked.' };
+          }
         }
         this.appendHistory(turnMessages);
         return {
           type: 'confirmation',
-          tool: 'run_shell',
-          args: { command },
-          summary: `Run shell command: ${command}`
-        };
-      }
-
-      if (request.tool === 'write_file') {
-        this.appendHistory(turnMessages);
-        return {
-          type: 'confirmation',
-          tool: 'write_file',
+          tool: request.tool,
           args: request.args ?? {},
-          summary: `Write file: ${String(request.args?.path ?? '')}`
+          summary: summaryForRequest(request),
+          tool_call_id: ''
         };
       }
 
-      if (request.tool === 'apply_patch') {
-        this.appendHistory(turnMessages);
-        return {
-          type: 'confirmation',
-          tool: 'apply_patch',
-          args: request.args ?? {},
-          summary: 'Apply patch to project files'
-        };
-      }
-
-      if (request.tool === 'replace_in_file') {
-        this.appendHistory(turnMessages);
-        return {
-          type: 'confirmation',
-          tool: 'replace_in_file',
-          args: request.args ?? {},
-          summary: `Replace text in file: ${String(request.args?.path ?? '')}`
-        };
-      }
-
-      if (request.tool === 'edit_file') {
-        this.appendHistory(turnMessages);
-        return {
-          type: 'confirmation',
-          tool: 'edit_file',
-          args: request.args ?? {},
-          summary: `Edit file: ${String(request.args?.path ?? '')} lines ${String(request.args?.startLine ?? '')}-${String(request.args?.endLine ?? '')}`
-        };
-      }
-
-      const observation = await this.executeTool(request);
-      turnMessages.push({ role: 'tool', content: observation });
+      const observation = await this.executeTool({ id: '', name: request.tool, arguments: request.args ?? {} });
+      turnMessages.push({ role: 'tool', content: observation, tool_call_id: '' });
       messages.splice(
         0,
         messages.length,
@@ -185,47 +351,51 @@ export class TerminalAgent {
     return { type: 'final', message: 'HelixCode stopped after too many tool rounds.' };
   }
 
-  private async getLLMResponse(messages: ChatMessage[], useStream: boolean, signal?: AbortSignal): Promise<string> {
+  private async getLLMResponse(
+    messages: ChatMessage[],
+    useStream: boolean,
+    signal?: AbortSignal
+  ): Promise<{ type: 'text'; content: string } | { type: 'tool_calls'; calls: ToolCall[] }> {
+    // Use non-streaming when tools are involved (first turn)
     if (useStream && this.options.onToken && this.options.provider.completeStream) {
-      const onToken = this.options.onToken;
-      return this.options.provider.completeStream(messages, onToken, signal ? { signal } : undefined);
+      const text = await this.options.provider.completeStream(
+        messages,
+        this.options.onToken,
+        signal ? { signal } : undefined
+      );
+      return { type: 'text', content: text };
     }
-    return this.options.provider.complete(messages);
+    return this.options.provider.complete(messages, TOOL_DEFINITIONS);
   }
 
-  private async executeTool(request: ToolRequest): Promise<string> {
-    const args = request.args ?? {};
+  private async executeTool(call: ToolCall): Promise<string> {
+    const args = call.arguments;
 
-    if (request.tool === 'read_file') {
+    if (call.name === 'read_file') {
       return JSON.stringify(await readFileTool(this.options.cwd, {
-        path: args.path,
-        startLine: args.startLine,
-        endLine: args.endLine
+        path: args.path, startLine: args.startLine, endLine: args.endLine
       }));
     }
-    if (request.tool === 'search_files') {
+    if (call.name === 'search_files') {
       return JSON.stringify(await searchFilesTool(this.options.cwd, {
-        query: args.query,
-        glob: args.glob,
-        caseSensitive: args.caseSensitive,
-        maxResults: args.maxResults,
-        contextLines: args.contextLines
+        query: args.query, glob: args.glob, caseSensitive: args.caseSensitive,
+        maxResults: args.maxResults, contextLines: args.contextLines
       }));
     }
-    if (request.tool === 'list_files') {
+    if (call.name === 'list_files') {
       return JSON.stringify(await listFilesTool(this.options.cwd));
     }
-    if (request.tool === 'git_status') {
+    if (call.name === 'git_status') {
       return await gitStatusTool(this.options.cwd);
     }
-    if (request.tool === 'git_diff') {
+    if (call.name === 'git_diff') {
       return await gitDiffTool(this.options.cwd);
     }
-    if (request.tool === 'update_plan') {
-      return JSON.stringify(this.updatePlan(request.args));
+    if (call.name === 'update_plan') {
+      return JSON.stringify(this.updatePlan(args));
     }
 
-    return JSON.stringify({ ok: false, error: `Unknown tool: ${request.tool}` });
+    return JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
   }
 
   private updatePlan(args: Record<string, unknown>): { ok: true; plan: PlanItem[] } | { ok: false; error: string } {
@@ -252,15 +422,36 @@ export class TerminalAgent {
   }
 }
 
+function summaryForTool(call: ToolCall): string {
+  const a = call.arguments;
+  switch (call.name) {
+    case 'write_file': return `Write file: ${String(a.path ?? '')}`;
+    case 'replace_in_file': return `Replace text in file: ${String(a.path ?? '')}`;
+    case 'edit_file': return `Edit file: ${String(a.path ?? '')} lines ${String(a.startLine ?? '')}-${String(a.endLine ?? '')}`;
+    case 'apply_patch': return 'Apply patch to project files';
+    case 'run_shell': return `Run shell command: ${String(a.command ?? '')}`;
+    default: return `Execute ${call.name}`;
+  }
+}
+
+function summaryForRequest(req: { tool: string; args?: Record<string, unknown> }): string {
+  const a = req.args ?? {};
+  switch (req.tool) {
+    case 'write_file': return `Write file: ${String(a.path ?? '')}`;
+    case 'replace_in_file': return `Replace text in file: ${String(a.path ?? '')}`;
+    case 'edit_file': return `Edit file: ${String(a.path ?? '')} lines ${String(a.startLine ?? '')}-${String(a.endLine ?? '')}`;
+    case 'apply_patch': return 'Apply patch to project files';
+    case 'run_shell': return `Run shell command: ${String(a.command ?? '')}`;
+    default: return `Execute ${req.tool}`;
+  }
+}
+
 export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): string {
   const lines = [
     'You are HelixCode, a terminal coding agent for local software projects.',
     'Be concise, practical, and focused on completing the user request.',
+    'Use the provided tools to inspect and modify the codebase.',
     'Reply normally when no tool is needed.',
-    'Reply with exactly one JSON object when calling a tool. Do not wrap tool JSON in prose or Markdown.',
-    'Tool call shape: {"tool":"read_file","args":{"path":"README.md"}}.',
-    'Available safe tools: read_file, list_files, search_files, git_status, git_diff, update_plan.',
-    'Available confirmed tools: write_file, replace_in_file, edit_file, apply_patch, run_shell.',
     'Before editing, inspect the relevant files with read_file or search_files.',
     'Prefer search_files for finding code, symbols, or text across the project.',
     'Use update_plan for multi-step work, keeping exactly one item in_progress when a plan is useful.',
@@ -269,10 +460,7 @@ export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): st
     'After changing code, run the smallest relevant verification command such as npm test, npm run typecheck, or npm run build.',
     'If a tool returns an error, read the error and recover instead of retrying the same invalid call.',
     'read_file accepts optional startLine and endLine. search_files accepts optional glob, caseSensitive, maxResults, and contextLines.',
-    'To write a file, use {"tool":"write_file","args":{"path":"path/to/file","content":"new content"}} and wait for user confirmation.',
-    'To replace exact text in a file, use {"tool":"replace_in_file","args":{"path":"path/to/file","oldText":"old","newText":"new"}} and wait for user confirmation. Set replaceAll true only when every match should change.',
-    'To edit existing files with a patch, use {"tool":"apply_patch","args":{"patch":"unified diff content"}} and wait for user confirmation.',
-    'For shell commands, use {"tool":"run_shell","args":{"command":"npm test"}} and wait for user confirmation.'
+    'Tools that modify files or run commands require user confirmation — wait for the result before continuing.'
   ];
 
   for (const instruction of projectInstructions) {

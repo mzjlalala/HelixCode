@@ -13,7 +13,8 @@ describe('confirmed action previews', () => {
       type: 'confirmation',
       tool: 'write_file',
       args: { path: 'README.md', content: 'new line\nkept\n' },
-      summary: 'Write file: README.md'
+      summary: 'Write file: README.md',
+      tool_call_id: 'test'
     });
 
     expect(preview).toContain('Tool: write_file');
@@ -41,7 +42,8 @@ describe('confirmed action previews', () => {
           ''
         ].join('\n')
       },
-      summary: 'Apply patch to project files'
+      summary: 'Apply patch to project files',
+      tool_call_id: 'test'
     });
 
     expect(preview).toContain('Tool: apply_patch');
@@ -58,7 +60,8 @@ describe('confirmed action previews', () => {
       type: 'confirmation',
       tool: 'replace_in_file',
       args: { path: 'README.md', oldText: 'old line', newText: 'new line' },
-      summary: 'Replace text in file: README.md'
+      summary: 'Replace text in file: README.md',
+      tool_call_id: 'test'
     });
 
     expect(preview).toContain('Tool: replace_in_file');
@@ -76,7 +79,8 @@ describe('confirmed action previews', () => {
       type: 'confirmation',
       tool: 'edit_file',
       args: { path: 'README.md', startLine: 2, endLine: 2, content: 'TWO' },
-      summary: 'Edit file: README.md lines 2-2'
+      summary: 'Edit file: README.md lines 2-2',
+      tool_call_id: 'test'
     });
 
     expect(preview).toContain('Tool: edit_file');
@@ -92,7 +96,8 @@ describe('confirmed action previews', () => {
       type: 'confirmation',
       tool: 'run_shell',
       args: { command: 'npm test' },
-      summary: 'Run shell command: npm test'
+      summary: 'Run shell command: npm test',
+      tool_call_id: 'test'
     });
 
     expect(preview).toContain('Tool: run_shell');
