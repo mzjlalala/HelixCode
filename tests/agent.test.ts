@@ -41,13 +41,13 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-describe('TerminalAgent', () => {  it('guides the model through a coding-agent tool workflow', () => {
+describe('TerminalAgent', () => {  it('builds a versatile system prompt for general and coding tasks', () => {
     const prompt = buildSystemPrompt([]);
 
-    expect(prompt).toContain('Before editing, inspect the relevant files');
-    expect(prompt).toContain('Prefer search_files');
-    expect(prompt).toContain('After changing code, run the smallest relevant verification command');
-    expect(prompt).toContain('Use the provided tools');
+    expect(prompt).toContain('versatile AI assistant');
+    expect(prompt).toContain('For GENERAL tasks');
+    expect(prompt).toContain('For CODING tasks');
+    expect(prompt).toContain('Available tools');
   });
 
   it('executes a safe read_file tool call and returns a final response', async () => {

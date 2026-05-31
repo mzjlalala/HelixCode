@@ -185,7 +185,8 @@ export function handleSlashCommand(
         'replace_in_file Replace exact text after confirmation',
         'edit_file      Replace an inclusive line range after confirmation',
         'apply_patch    Apply a unified diff after confirmation',
-        'run_shell      Run a shell command after confirmation'
+        'run_shell      Run a shell command after confirmation',
+        'web_search     Search the web (needs BRAVE_API_KEY)',
       ].join('\n')
     };
   }

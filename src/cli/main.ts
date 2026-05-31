@@ -4,11 +4,11 @@ import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import type { CompleterResult } from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
-import { writeSync, readdirSync } from 'node:fs';
+import { writeSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { resolve, dirname, basename } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, savePermissionMode } from '../core/config.js';
 import { loadHistory, saveHistory } from '../core/history-store.js';
@@ -72,7 +72,7 @@ program
   }) => {
     if (options.doctor) {
       output.write(`${await createDoctorOutput(options.cwd)}\n`);
-      return;
+      process.exit(process.exitCode || 0);
     }
     const prompt = joinPromptArgs(promptParts);
     if (prompt) {
@@ -81,7 +81,7 @@ program
         maxTurns: parseMaxTurns(options.maxTurns),
         ...(options.model ? { model: options.model } : {})
       });
-      return;
+      process.exit(process.exitCode || 0);
     }
     await runRepl(options.cwd, options.model, options.mode as PermissionMode | undefined);
   });
@@ -186,56 +186,18 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
     const content = await readAllStdin();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
       const exit = await handleInputLine(line, { agent, config, projectInstructions, runtime, rl: null });
-      if (exit) return;
+      if (exit) {
+        saveHistory(config.cwd, agent.getHistory()).catch(() => {});
+        process.exit(0);
+      }
     }
     return;
   }
 
   const completer = (line: string): CompleterResult => {
-    // Slash command completion
-    if (line.trimStart().startsWith('/')) {
-      const candidates = completeSlashCommand(line);
-      return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
-    }
-
-    // File path completion — sync readdir for reliability
-    const words = line.split(/\s+/);
-    const lastWord = words[words.length - 1] ?? '';
-    if (!lastWord || /^[/\\]/.test(lastWord) || lastWord.startsWith('~')) return [[], line];
-
-    try {
-      let searchDir: string;
-      let prefix: string;
-      let parent: string;
-
-      if (lastWord.endsWith('/') || lastWord.endsWith('\\')) {
-        // "src/" → list contents of src/
-        parent = lastWord.replace(/[/\\]$/, '');
-        searchDir = resolve(config.cwd, parent);
-        prefix = '';
-      } else {
-        parent = dirname(lastWord).replace(/\\/g, '/');
-        searchDir = parent === '.' ? config.cwd : resolve(config.cwd, parent);
-        prefix = basename(lastWord);
-      }
-
-      const entries = readdirSync(searchDir, { withFileTypes: true });
-      const prefixLower = prefix.toLowerCase();
-      const matches = entries
-        .filter((e) => {
-          if (e.name.startsWith('.')) return false;
-          return prefixLower === '' || e.name.toLowerCase().startsWith(prefixLower);
-        })
-        .map((e) => {
-          const name = e.isDirectory() ? `${e.name}/` : e.name;
-          return parent && parent !== '.' ? `${parent.replace(/\\/g, '/')}/${name}` : name;
-        })
-        .sort();
-
-      return [matches.length ? matches : [lastWord], lastWord];
-    } catch {
-      return [[], line];
-    }
+    if (!line.trimStart().startsWith('/')) return [[], line];
+    const candidates = completeSlashCommand(line);
+    return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
   };
 
   // Prep listener BEFORE createInterface so our handler fires before readline's
@@ -273,6 +235,7 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
     output.write(`\n${style.dim('Goodbye.')}\n`);
     saveHistory(config.cwd, agent.getHistory()).catch(() => {});
     rl.close();
+    process.exit(0);
   });
 
   while (!closing) {
@@ -287,7 +250,10 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
       output.write(RESET);
     }
     if (!line) continue;
-    if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl })) break;
+    if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl })) {
+      saveHistory(config.cwd, agent.getHistory()).catch(() => {});
+      process.exit(0);
+    }
   }
 
   rl.close();
@@ -661,5 +627,5 @@ export async function isMainModule(metaUrl: string, argvPath: string | undefined
 }
 
 if (await isMainModule(import.meta.url, process.argv[1])) {
-  await program.parseAsync(process.argv);
+  program.parseAsync(process.argv).then(() => process.exit(process.exitCode || 0));
 }

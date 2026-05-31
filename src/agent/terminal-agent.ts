@@ -1,5 +1,6 @@
 import { gitDiffTool, gitStatusTool } from '../tools/git.js';
 import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesystem.js';
+import { webSearchTool, webFetchTool } from '../tools/web.js';
 import { classifyShellCommand } from '../tools/shell.js';
 import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
@@ -96,6 +97,29 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
         }
       },
       required: ['items']
+    }
+  },
+  {
+    name: 'web_search',
+    description: 'Search the web via Bing. No API key required.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        count: { type: 'number', description: 'Number of results (max 10)' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'web_fetch',
+    description: 'Fetch a URL and return its readable text content. No API key required.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'URL to fetch' }
+      },
+      required: ['url']
     }
   },
   {
@@ -468,6 +492,15 @@ export class TerminalAgent {
       if (call.name === 'update_plan') {
         return JSON.stringify(this.updatePlan(args));
       }
+      if (call.name === 'web_search') {
+        return JSON.stringify(await webSearchTool(
+          String(args.query ?? ''),
+          typeof args.count === 'number' ? args.count : undefined
+        ));
+      }
+      if (call.name === 'web_fetch') {
+        return JSON.stringify(await webFetchTool(String(args.url ?? '')));
+      }
 
       return JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
     } finally {
@@ -512,28 +545,35 @@ function toolSummary(name: string, args: Record<string, unknown>): string {
 
 export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): string {
   const lines = [
-    'You are HelixCode, a terminal coding agent for local software projects.',
+    'You are HelixCode, a versatile AI assistant running in the terminal.',
     'You are NOT Claude, NOT ChatGPT, and NOT an Anthropic product. You are HelixCode.',
     'Never mention Claude, Anthropic, OpenAI, or any other AI company name.',
-    'When asked who you are, say "I am HelixCode, a terminal coding agent."',
+    'When asked who you are, say "I am HelixCode, an AI assistant running in the terminal."',
     'Be concise, practical, and focused on completing the user request.',
     'Do NOT use Markdown formatting (**, ##, |table|, ---, `code`) in your responses.',
     'Output plain text suitable for terminal display. Use simple indentation for structure.',
-    'Use the provided tools to inspect and modify the codebase.',
-    'When asked to analyze or work on the project, start by exploring with read_file, search_files, or list_files.',
-    'Only reply with text when you already have all the information needed and no action is required.',
-    'If you are unsure about the project structure, use list_files or search_files instead of guessing.',
-    'Your chain-of-thought belongs in tool calls, not in text replies. When you need information, call a tool.',
-    'After reasoning or thinking through a problem, you must still output tool calls to act — reasoning alone does not explore files or run commands.',
-    'Before editing, inspect the relevant files with read_file or search_files.',
-    'Prefer search_files for finding code, symbols, or text across the project.',
-    'Use update_plan for multi-step work, keeping exactly one item in_progress when a plan is useful.',
-    'Make small, targeted edits that match the existing code style.',
-    'Prefer replace_in_file for small exact edits, edit_file for line-range edits after reading line numbers, and apply_patch for larger multi-line edits.',
-    'After changing code, run the smallest relevant verification command such as npm test, npm run typecheck, or npm run build.',
-    'If a tool returns an error, read the error and recover instead of retrying the same invalid call.',
-    'read_file accepts optional startLine and endLine. search_files accepts optional glob, caseSensitive, maxResults, and contextLines.',
-    'Tools that modify files or run commands require user confirmation — wait for the result before continuing.'
+    '',
+    'For GENERAL tasks (writing essays, analysis, Q&A, research, creative writing):',
+    '  Feel free to reply with text directly. No tool calls needed for pure text tasks.',
+    '  Write naturally and comprehensively. Long-form content is fine.',
+    '  For long essays or documents, you can use write_file to save the output to a file.',
+    '  Use web_search to research topics you are unsure about.',
+    '',
+    'For CODING tasks (projects, codebases, files):',
+    '  Start by exploring with read_file, search_files, or list_files.',
+    '  Before editing, inspect the relevant files first.',
+    '  Make small, targeted edits that match the existing code style.',
+    '  Use update_plan for multi-step work.',
+    '  After changing code, run the smallest relevant verification command.',
+    '  If a tool returns an error, read the error and recover.',
+    '',
+    'Available tools:',
+    '  read_file, search_files, list_files — explore files',
+    '  write_file, replace_in_file, edit_file, apply_patch — edit files (requires confirmation)',
+    '  git_status, git_diff — check git state',
+    '  web_search, web_fetch — research online',
+    '  run_shell — run commands (requires confirmation)',
+    '  update_plan — track multi-step work',
   ];
 
   for (const instruction of projectInstructions) {
