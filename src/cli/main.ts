@@ -198,14 +198,23 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
   };
 
   // Prep listener BEFORE createInterface so our handler fires before readline's
-  let modeCyclePending = false;
   let rl: ReturnType<typeof createInterface>;
   emitKeypressEvents(input);
   input.prependListener('keypress', (_str: string, key: { name?: string; shift?: boolean }) => {
     if (key && key.name === 'tab' && key.shift && !closing) {
       currentMode = cycleMode(currentMode);
-      modeCyclePending = true;
       savePermissionMode(config.cwd, currentMode).catch(() => {});
+
+      // Update readline's prompt and refresh line
+      // Then fix cursor position since readline incorrectly counts escape sequences
+      if (rl) {
+        rl.setPrompt(`${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} > `);
+        rl.prompt(true);
+        // Correct cursor: prompt = label + " > " (visual), readline counted escape chars
+        const visualPromptLen = MODE_LABELS[currentMode].label.length + 3;
+        const cursorInLine = (rl as any).cursor ?? 0;
+        writeOutput(`\x1b[${visualPromptLen + cursorInLine + 1}G`);
+      }
     }
   });
 
@@ -228,10 +237,6 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
   while (!closing) {
     let line: string;
     try {
-      if (modeCyclePending) {
-        modeCyclePending = false;
-        output.write(`${RESET}\n${style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`)}\n`);
-      }
       output.write(`\n${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} `);
       line = (await rl.question('> ')).trim();
     } catch {
