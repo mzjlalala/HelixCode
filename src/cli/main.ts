@@ -84,12 +84,12 @@ function stopTimer(): void {
   }
 }
 
-function stopTimerAndClear(): void {
+function stopTimerAndFreeze(): void {
   if (timerInterval) {
     clearInterval(timerInterval);
     timerInterval = null;
-    const elapsed = (performance.now() - turnStartMs) / 1000;
-    output.write(`\r${style.dim(`⠿ ${elapsed.toFixed(1)}s`)}`);
+    // Clear the animated spinner line so streaming content follows cleanly
+    output.write('\r' + ' '.repeat(30) + '\r');
   }
 }
 
@@ -120,7 +120,7 @@ export async function runOnce(
   cliTimings = [];
   startTimer();
   const result = await context.agent.run(prompt);
-  stopTimerAndClear();
+  stopTimerAndFreeze();
   await handleAgentResult(result, {
     agent: context.agent,
     config: context.config,
@@ -237,7 +237,7 @@ async function handleInputLine(
   startTimer();
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
-    stopTimerAndClear();
+    stopTimerAndFreeze();
     if (result.type === 'final' && abort.signal.aborted) {
       const partialTotal = performance.now() - turnStartMs;
       const timeline = result.timeline ?? [];
@@ -265,6 +265,14 @@ async function handleAgentResult(
   }
 ): Promise<void> {
   if (result.type === 'final') {
+    // Display timing timeline first (before response, after user question)
+    const merged = mergeAgentTimeline(result.timeline, cliTimings);
+    const totalWallClock = performance.now() - turnStartMs;
+    if (merged.length > 0 || cliTimings.length > 0) {
+      output.write(`${formatTimeline(merged, totalWallClock)}\n`);
+    }
+    cliTimings = [];
+
     const message = !streamedThisTurn ? stripMarkdown(result.message) : '';
     if (!streamedThisTurn) {
       const prefix = lastOutput ? '\n' : '';
@@ -272,13 +280,6 @@ async function handleAgentResult(
     } else {
       output.write('\n');
     }
-    // Display timing timeline
-    const merged = mergeAgentTimeline(result.timeline, cliTimings);
-    const totalWallClock = performance.now() - turnStartMs;
-    if (merged.length > 0 || cliTimings.length > 0) {
-      output.write(`${formatTimeline(merged, totalWallClock)}\n`);
-    }
-    cliTimings = [];
     streamedThisTurn = false;
     lastOutput = null;
     return;
@@ -380,7 +381,7 @@ function formatTimeline(entries: TimingEntry[], totalMs: number): string {
   // Only LLM calls, no tool calls → just show total
   const hasTools = entries.some((e) => e.label !== 'llm');
   if (!hasTools) {
-    return style.dim(`⏱ ${total}s`);
+    return style.dim(`⠿ ${total}s`);
   }
 
   // Show detailed timeline
@@ -389,7 +390,7 @@ function formatTimeline(entries: TimingEntry[], totalMs: number): string {
     return e.calls > 1 ? `${e.label} ${time}s (${e.calls})` : `${e.label} ${time}s`;
   });
 
-  return style.dim(`⏱ ${total}s · ${parts.join(' · ')}`);
+  return style.dim(`⠿ ${total}s · ${parts.join(' · ')}`);
 }
 
 async function createRuntimeContext(cwd: string, modelOverride?: string): Promise<{
@@ -416,14 +417,14 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     provider,
     projectInstructions,
     onToken: (token) => {
-      stopTimerAndClear(); // Clear real-time timer before first streaming token
+      stopTimerAndFreeze(); // Freeze spinner before first streaming token
       streamedThisTurn = true;
       if (lastOutput === 'reasoning') output.write('\n');
       lastOutput = 'content';
       output.write(token);
     },
     onReasoning: (text) => {
-      stopTimerAndClear(); // Clear real-time timer before first reasoning token
+      stopTimerAndFreeze(); // Freeze spinner before first reasoning token
       if (lastOutput === 'content') output.write('\n');
       lastOutput = 'reasoning';
       output.write(`\x1b[2m\x1b[3m${text}\x1b[0m`);
