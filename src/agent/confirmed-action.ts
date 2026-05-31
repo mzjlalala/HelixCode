@@ -7,69 +7,50 @@ import { countTextLines, createCompactTextDiff } from '../tools/text-diff.js';
 import { style } from '../cli/style.js';
 
 type Confirmation = Extract<AgentTurnResult, { type: 'confirmation' }>;
+type ConfirmedToolResult = { ok: true; output: string } | { ok: false; error: string };
+
+const previewHandlers: Record<string, (cwd: string, c: Confirmation) => string | Promise<string>> = {
+  write_file: previewWriteFile,
+  replace_in_file: previewReplaceInFile,
+  edit_file: previewEditFile,
+  apply_patch: (_cwd, c) => previewPatch(c),
+};
 
 export async function previewConfirmedTool(cwd: string, confirmation: Confirmation): Promise<string> {
-  if (confirmation.tool === 'write_file') {
-    return previewWriteFile(cwd, confirmation);
-  }
-  if (confirmation.tool === 'apply_patch') {
-    return previewPatch(confirmation);
-  }
-  if (confirmation.tool === 'replace_in_file') {
-    return previewReplaceInFile(cwd, confirmation);
-  }
-  if (confirmation.tool === 'edit_file') {
-    return previewEditFile(cwd, confirmation);
-  }
-  return previewShell(cwd, confirmation);
+  const handler = previewHandlers[confirmation.tool] ?? previewShell;
+  return await handler(cwd, confirmation);
 }
 
-export async function executeConfirmedTool(
-  cwd: string,
-  confirmation: Confirmation
-): Promise<{ ok: true; output: string } | { ok: false; error: string }> {
-  if (confirmation.tool === 'write_file') {
-    const result = await writeFileTool(cwd, {
-      path: confirmation.args.path,
-      content: confirmation.args.content
-    });
+const executeHandlers: Record<string, (cwd: string, c: Confirmation) => Promise<ConfirmedToolResult>> = {
+  write_file: async (cwd, c) => {
+    const result = await writeFileTool(cwd, { path: c.args.path, content: c.args.content });
     if (!result.ok) return result;
     return { ok: true, output: `Wrote ${result.path}` };
-  }
-
-  if (confirmation.tool === 'apply_patch') {
-    return applyPatchTool(cwd, { patch: confirmation.args.patch });
-  }
-
-  if (confirmation.tool === 'replace_in_file') {
+  },
+  apply_patch: async (cwd, c) => applyPatchTool(cwd, { patch: c.args.patch }),
+  replace_in_file: async (cwd, c) => {
     const result = await replaceInFileTool(cwd, {
-      path: confirmation.args.path,
-      oldText: confirmation.args.oldText,
-      newText: confirmation.args.newText,
-      replaceAll: confirmation.args.replaceAll
+      path: c.args.path, oldText: c.args.oldText, newText: c.args.newText, replaceAll: c.args.replaceAll
     });
     if (!result.ok) return result;
     return { ok: true, output: `Replaced ${result.replacements} match(es) in ${result.path}` };
-  }
-
-  if (confirmation.tool === 'edit_file') {
-    const result = await editFileTool(cwd, {
-      path: confirmation.args.path,
-      startLine: confirmation.args.startLine,
-      endLine: confirmation.args.endLine,
-      content: confirmation.args.content
-    });
+  },
+  edit_file: async (cwd, c) => {
+    const result = await editFileTool(cwd, { path: c.args.path, startLine: c.args.startLine, endLine: c.args.endLine, content: c.args.content });
     if (!result.ok) return result;
-    return { ok: true, output: `Edited ${result.path} lines ${String(confirmation.args.startLine)}-${String(confirmation.args.endLine)}` };
-  }
+    return { ok: true, output: `Edited ${result.path} lines ${String(c.args.startLine)}-${String(c.args.endLine)}` };
+  },
+  run_shell: async (cwd, c) => {
+    const command = String(c.args.command ?? '');
+    const result = await runShellCommand(cwd, command);
+    if (!result.ok) return result;
+    return { ok: true, output: [result.stdout, result.stderr].filter(Boolean).join('\n') };
+  },
+};
 
-  const command = String(confirmation.args.command ?? '');
-  const result = await runShellCommand(cwd, command);
-  if (!result.ok) return result;
-  return {
-    ok: true,
-    output: [result.stdout, result.stderr].filter(Boolean).join('\n')
-  };
+export async function executeConfirmedTool(cwd: string, confirmation: Confirmation): Promise<ConfirmedToolResult> {
+  const handler = executeHandlers[confirmation.tool];
+  return handler!(cwd, confirmation);
 }
 
 function fmtPath(p: string): string {

@@ -2,7 +2,6 @@ import { gitDiffTool, gitStatusTool } from '../tools/git.js';
 import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesystem.js';
 import { classifyShellCommand } from '../tools/shell.js';
 import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '../llm/types.js';
-import { parseToolRequest } from './tool-request.js';
 import type { ProjectInstruction } from '../core/config.js';
 
 export type AgentTurnResult =
@@ -165,7 +164,6 @@ const CONFIRMED_TOOLS = new Set(TOOL_DEFINITIONS.filter((t) => t.confirm).map((t
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
   private readonly plan: PlanItem[] = [];
-  private turnCount = 0;
 
   constructor(private readonly options: {
     cwd: string;
@@ -233,16 +231,17 @@ export class TerminalAgent {
   }
 
   private async completeTurn(turnMessages: ChatMessage[], streamFirst = false, signal?: AbortSignal): Promise<AgentTurnResult> {
-    this.turnCount += 1;
-    const isFirstTurn = this.turnCount === 1;
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
       ...this.history,
       ...turnMessages
     ];
 
+    let isFirstTurn = streamFirst;
+
     for (let i = 0; i < 6; i += 1) {
       const result = await this.getLLMResponse(messages, isFirstTurn, signal);
+      isFirstTurn = false;
 
       // Display reasoning if available (non-streaming path)
       if (result.reasoning_content && this.options.onReasoning) {
@@ -313,49 +312,10 @@ export class TerminalAgent {
         continue;
       }
 
-      // Text response — check for fallback JSON tool request
-      const request = parseToolRequest((result as { type: 'text'; content: string }).content);
-      if (!request) {
-        turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
-        this.appendHistory(turnMessages);
-        return { type: 'final', message: result.content };
-      }
-
-      // Legacy JSON protocol fallback (for models that don't support tool calling well)
+      // Text response — return as final
       turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
-
-      if (CONFIRMED_TOOLS.has(request.tool)) {
-        if (request.tool === 'run_shell') {
-          const command = String(request.args?.command ?? '').trim();
-          const risk = classifyShellCommand(command);
-          if (risk.risk === 'blocked') {
-            turnMessages.push({
-              role: 'tool',
-              content: JSON.stringify({ ok: false, error: risk.reason ?? 'Command blocked.' })
-            });
-            this.appendHistory(turnMessages);
-            return { type: 'final', message: risk.reason ?? 'Command blocked.' };
-          }
-        }
-        this.appendHistory(turnMessages);
-        return {
-          type: 'confirmation',
-          tool: request.tool,
-          args: request.args ?? {},
-          summary: toolSummary(request.tool, request.args ?? {}),
-          tool_call_id: ''
-        };
-      }
-
-      const observation = await this.executeTool({ id: '', name: request.tool, arguments: request.args ?? {} });
-      turnMessages.push({ role: 'tool', content: observation, tool_call_id: '' });
-      messages.splice(
-        0,
-        messages.length,
-        { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
-        ...this.history,
-        ...turnMessages
-      );
+      this.appendHistory(turnMessages);
+      return { type: 'final', message: result.content };
     }
 
     this.appendHistory(turnMessages);
