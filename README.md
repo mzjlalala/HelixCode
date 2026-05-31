@@ -1,153 +1,202 @@
 # HelixCode
 
-HelixCode is a terminal coding agent inspired by Claude Code. Run `helix` in a repository, describe the work in natural language, and let the agent inspect files, search code, review git state, write files, apply patches, and request confirmation for risky actions.
+**HelixCode** is a terminal AI coding agent. Run `helix` in any project directory, describe what you want in natural language, and it inspects files, searches code, edits source, runs commands, and manages git — all with user confirmation for risky actions.
+
+```
+        ╭─╮       ╭─╮
+       ╱   ╲     ╱   ╲
+      ╱     ╲   ╱     ╲
+      ╲     ╱   ╲     ╱
+       ╲   ╱     ╲   ╱
+        ╰─╯       ╰─╯
+
+      H E L I X C O D E
+  AI Software Engineering Agent
+```
+
+Powered by OpenAI-compatible APIs with native tool calling, streaming output, and DeepSeek reasoning mode support.
+
+---
+
+## Quick Start
+
+```bash
+# Install globally
+npm install -g helixcode
+
+# Or run from source
+git clone https://github.com/mzjlalala/HelixCode.git
+cd HelixCode
+npm install
+npm run build
+npm install -g .
+```
+
+Set your API key and start the REPL:
+
+```bash
+export HELIX_PROVIDER=openai
+export OPENAI_API_KEY=sk-your-key-here
+helix
+```
 
 ## Requirements
 
-- Node.js 20+
-- An OpenAI-compatible API key
+- **Node.js 20+**
+- An **OpenAI-compatible API key** (OpenAI, DeepSeek, or custom provider)
 
 ## Configuration
 
-Set these environment variables for OpenAI-compatible providers.
+HelixCode reads configuration from environment variables. Copy `.env.example` to `.env` or set them directly.
 
-OpenAI:
+### OpenAI
 
-```powershell
-$env:HELIX_PROVIDER="openai"
-$env:OPENAI_API_KEY="your-openai-key"
-$env:HELIX_CHAT_MODEL="gpt-4o"
+```bash
+export HELIX_PROVIDER=openai
+export OPENAI_API_KEY=sk-your-openai-key
+export HELIX_CHAT_MODEL=gpt-4o
 ```
 
-DeepSeek:
+### DeepSeek (with thinking/reasoning)
 
-```powershell
-$env:HELIX_PROVIDER="deepseek"
-$env:DEEPSEEK_API_KEY="your-deepseek-key"
-$env:HELIX_CHAT_MODEL="deepseek-chat"
+```bash
+export HELIX_PROVIDER=deepseek
+export DEEPSEEK_API_KEY=sk-your-deepseek-key
+export HELIX_CHAT_MODEL=deepseek-chat
 ```
 
-Custom OpenAI-compatible endpoint:
+DeepSeek thinking mode is automatically enabled. `reasoning_content` is captured and returned in subsequent requests as required by the API.
 
-```powershell
-$env:HELIX_PROVIDER="custom"
-$env:HELIX_API_KEY="your-api-key"
-$env:HELIX_BASE_URL="https://your-provider.example/v1"
-$env:HELIX_CHAT_MODEL="your-model"
+### Custom OpenAI-compatible endpoint
+
+```bash
+export HELIX_PROVIDER=custom
+export HELIX_API_KEY=your-api-key
+export HELIX_BASE_URL=https://your-provider.example/v1
+export HELIX_CHAT_MODEL=your-model
 ```
 
-`HELIX_API_KEY`, `DEEPSEEK_API_KEY`, and `OPENAI_API_KEY` are supported. `HELIX_API_KEY` is the generic override.
+### Environment variables reference
 
-## Development
+| Variable | Description |
+|----------|-------------|
+| `HELIX_PROVIDER` | Provider: `openai`, `deepseek`, or `custom` |
+| `HELIX_API_KEY` | Universal API key (fallback) |
+| `OPENAI_API_KEY` | OpenAI-specific key |
+| `DEEPSEEK_API_KEY` | DeepSeek-specific key |
+| `HELIX_CHAT_MODEL` | Model override (default: `gpt-4o` / `deepseek-chat`) |
+| `HELIX_BASE_URL` | API base URL override |
 
-```powershell
-npm install
-npm run dev -- --cwd .
-npm test
-npm run typecheck
-npm run build
-```
+---
 
-## Run
+## Usage
 
-```powershell
+### Interactive REPL
+
+```bash
 helix
+```
+
+### One-shot mode
+
+```bash
 helix "explain this project"
+helix --model gpt-4o-mini "find all TODO comments"
 helix --yes --max-turns 10 "fix the failing tests"
 ```
 
-Passing a prompt runs one non-interactive agent turn and exits. Confirmed actions
-are previewed but skipped in non-interactive mode.
+### CLI flags
 
-For local development without installing the CLI globally:
+| Flag | Description |
+|------|-------------|
+| `-C, --cwd <path>` | Project directory |
+| `--doctor` | Show diagnostics and exit |
+| `-y, --yes` | Auto-confirm actions in one-shot mode |
+| `--max-turns <N>` | Max auto-confirm turns (default: 10) |
+| `--model <name>` | Override chat model |
 
-```powershell
-npm run dev -- --cwd .
+### Slash commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show help |
+| `/status` | Show project, model, and session state |
+| `/doctor` | Show full diagnostics |
+| `/model` | Show current model |
+| `/model <name>` | Switch model at runtime |
+| `/history` | Show history message count |
+| `/plan` | Show session plan |
+| `/compact` | Compact session history |
+| `/compact N` | Compact to N messages |
+| `/tools` | List available tools |
+| `/reset` | Clear session context |
+| `/clear` | Clear screen and context |
+| `/exit`, `/quit`, `/q` | Exit HelixCode |
+
+---
+
+## Architecture
+
+HelixCode uses **native OpenAI tool calling** (`tools` parameter + `tool_calls` response) to drive an agent loop. The agent can make up to 6 tool calls per turn.
+
+### Tools
+
+| Tool | Auto-execute | Description |
+|------|:---:|-------------|
+| `read_file` | ✅ | Read file by path, optionally by line range |
+| `list_files` | ✅ | List project files |
+| `search_files` | ✅ | Search text with glob/context/limit |
+| `git_status` | ✅ | Git working tree status |
+| `git_diff` | ✅ | Git diff (unstaged) |
+| `update_plan` | ✅ | Track multi-step plan |
+| `write_file` | — | Write file (confirmed) |
+| `replace_in_file` | — | Replace exact text (confirmed) |
+| `edit_file` | — | Replace line range (confirmed) |
+| `apply_patch` | — | Apply unified diff (confirmed) |
+| `run_shell` | — | Run shell command (confirmed) |
+
+**Safety**: Destructive commands (`rm -rf`, `git reset --hard`, etc.) are blocked server-side. Shell commands have a 120s timeout. File paths are checked against project root traversal.
+
+### Project instructions
+
+Place `AGENTS.md` or `.helix/instructions.md` at the project root to inject custom instructions into the agent's system prompt.
+
+---
+
+## Features
+
+- **Streaming output** — tokens appear in real-time as the model generates them
+- **Native tool calling** — uses OpenAI-compatible `tools`/`tool_calls` protocol
+- **DeepSeek reasoning** — automatic thinking mode with `reasoning_content` preservation
+- **Styled terminal UI** — colored output, symbols, confirmation previews with diffs
+- **Confirmation flow** — safe tools auto-execute, risky tools show a preview before proceeding
+- **Ctrl+C cancellation** — interrupt an in-progress LLM call without exiting the REPL
+- **Runtime model switching** — change the model mid-session with `/model <name>`
+
+---
+
+## Development
+
+```bash
+npm install                 # Install dependencies
+npm run dev -- --cwd .      # Start REPL from source
+npm test                    # Run tests (61 tests)
+npm run typecheck           # Full type check
+npm run build               # Build dist/ via tsup
 ```
 
-If no supported API key is set, HelixCode exits before
-starting the REPL and prints a short setup hint. `helix --help` still works
-without an API key.
+### Validation
 
-Project-specific instructions can be placed in `AGENTS.md` or
-`.helix/instructions.md` at the project root. HelixCode loads both files when
-present and includes them in the agent's system prompt.
-
-Useful slash commands:
-
-```text
-/help
-/status
-/doctor
-/model
-/history
-/plan
-/compact
-/tools
-/reset
-/clear
-/exit
-```
-
-## Safety
-
-HelixCode can read and search files directly. It asks for confirmation before writing files, applying patches, or running shell commands. Before confirmation, it prints a readable preview that includes the target file, patch files, or shell command. Destructive shell commands such as `git reset --hard` and `rm -rf` are blocked.
-
-Shell commands must be non-empty. A command that exits with a non-zero status is
-reported as a failed action with its captured output, so the agent can continue
-from the actual command result.
-
-## Current Agent Tools
-
-- `read_file`
-- `list_files`
-- `search_files`
-- `git_status`
-- `git_diff`
-- `update_plan`
-- `write_file`
-- `replace_in_file`
-- `edit_file`
-- `apply_patch`
-- `run_shell`
-
-The REPL keeps short session context, so the agent can use prior tool observations and confirmed action results while the process is running.
-The agent can maintain a lightweight in-memory task plan with `update_plan`;
-use `/plan` to inspect it during the current session.
-
-`read_file` can read a full file or a line range with `startLine` and `endLine`.
-`search_files` accepts optional `glob`, `caseSensitive`, `maxResults`, and
-`contextLines` fields. Prefer `replace_in_file` for small exact edits; it shows
-a confirmation preview before changing the target file.
-
-Use `/doctor` to inspect local runtime diagnostics, including cwd, model, base
-URL, API key status, Node version, project instructions, history size, and plan
-item count. Use `helix --doctor` to print the same diagnostics without starting
-the REPL or requiring an API key. Use `/model` to inspect the active chat model
-or `/model <name>` to switch it for the current session. Use `/reset` to clear session context without
-clearing the screen, `/compact` to keep only the most recent session messages,
-`/clear` to clear both the screen and session context, and `/history` to inspect
-the current context size.
-
-Tool requests are parsed from strict JSON, fenced JSON code blocks, or a balanced JSON object embedded in a short assistant response.
-
-## MVP Boundaries
-
-HelixCode currently uses a JSON tool protocol with an OpenAI-compatible chat API.
-It does not yet implement native model tool calling, MCP, persistent task
-storage, or a plugin system.
-
-## Validation
-
-Before relying on a local build, run:
-
-```powershell
+```bash
 npm run typecheck
 npm test
 npm run build
-npx tsx src\cli\main.ts --help
-npx tsx src\cli\main.ts --doctor
+npx tsx src/cli/main.ts --help
+npx tsx src/cli/main.ts --doctor
 ```
 
-The npm package includes the built `dist` directory, so run `npm run build`
-before packing or installing from this checkout.
+---
+
+## License
+
+[Apache-2.0](LICENSE) — Copyright 2025 Mason
