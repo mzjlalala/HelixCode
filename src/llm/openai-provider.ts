@@ -111,7 +111,7 @@ export class OpenAIChatProvider implements ChatProvider {
   async completeStream(
     messages: ChatMessage[],
     onToken: (token: string) => void,
-    options?: { signal?: AbortSignal; tools?: ToolDefinition[] }
+    options?: { signal?: AbortSignal; tools?: ToolDefinition[]; onReasoning?: (text: string) => void }
   ): Promise<ChatResult> {
     if (!this.config.apiKey.trim()) {
       return { type: 'text', content: 'API key is not set.' };
@@ -141,6 +141,7 @@ export class OpenAIChatProvider implements ChatProvider {
         choices?: Array<{
           delta?: {
             content?: string | null;
+            reasoning_content?: string | null;
             tool_calls?: Array<{
               index: number;
               id?: string;
@@ -162,6 +163,11 @@ export class OpenAIChatProvider implements ChatProvider {
       for await (const chunk of stream) {
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) continue;
+
+        // Stream reasoning/thinking tokens (DeepSeek)
+        if (delta.reasoning_content && options?.onReasoning) {
+          options.onReasoning(delta.reasoning_content);
+        }
 
         // Stream text tokens
         if (delta.content) {

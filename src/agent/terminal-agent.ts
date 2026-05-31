@@ -171,6 +171,7 @@ export class TerminalAgent {
     provider: ChatProvider;
     projectInstructions?: ProjectInstruction[];
     onToken?: (token: string) => void;
+    onReasoning?: (text: string) => void;
   }) {}
 
   async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
@@ -361,10 +362,13 @@ export class TerminalAgent {
     | { type: 'tool_calls'; calls: ToolCall[]; reasoning_content?: string | null }
   > {
     if (this.options.onToken && this.options.provider.completeStream) {
+      const streamOptions: Record<string, unknown> = { tools: TOOL_DEFINITIONS };
+      if (signal) streamOptions.signal = signal;
+      if (this.options.onReasoning) streamOptions.onReasoning = this.options.onReasoning;
       return this.options.provider.completeStream(
         messages,
         this.options.onToken,
-        { ...(signal ? { signal } : {}), tools: TOOL_DEFINITIONS }
+        streamOptions as { signal?: AbortSignal; tools?: ToolDefinition[]; onReasoning?: (text: string) => void }
       );
     }
     return this.options.provider.complete(messages, TOOL_DEFINITIONS);

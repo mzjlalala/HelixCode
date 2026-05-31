@@ -60,6 +60,7 @@ program
 // Module-level state
 let currentAbort: AbortController | null = null;
 let streamedThisTurn = false;
+let hadReasoning = false;
 
 export async function runOnce(
   cwd: string,
@@ -178,6 +179,7 @@ async function handleInputLine(
   const abort = new AbortController();
   currentAbort = abort;
   streamedThisTurn = false;
+  hadReasoning = false;
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
     if (result.type === 'final' && abort.signal.aborted) {
@@ -282,7 +284,16 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     projectInstructions,
     onToken: (token) => {
       streamedThisTurn = true;
+      if (hadReasoning) {
+        hadReasoning = false;
+        output.write('\n');
+      }
       output.write(token);
+    },
+    onReasoning: (text) => {
+      streamedThisTurn = true;
+      hadReasoning = true;
+      output.write(`\x1b[2m\x1b[3m${text}\x1b[0m`);
     }
   });
   return { config, projectInstructions, runtime, agent };

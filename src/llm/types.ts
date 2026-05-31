@@ -29,6 +29,6 @@ export interface ChatProvider {
   completeStream?(
     messages: ChatMessage[],
     onToken: (token: string) => void,
-    options?: { signal?: AbortSignal; tools?: ToolDefinition[] }
+    options?: { signal?: AbortSignal; tools?: ToolDefinition[]; onReasoning?: (token: string) => void }
   ): Promise<ChatResult>;
 }
