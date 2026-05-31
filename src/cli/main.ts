@@ -18,7 +18,7 @@ import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS 
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.js';
 import { showWelcome, style, SYMBOL } from './style.js';
-import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
+import { cycleMode, formatModeTag, MODE_ANSI, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
 import { undoLast } from '../tools/undo.js';
 
 // Windows console output helper.
@@ -198,14 +198,18 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
   };
 
   // Prep listener BEFORE createInterface so our handler fires before readline's
-  let modeCyclePending = false;
   let rl: ReturnType<typeof createInterface>;
   emitKeypressEvents(input);
   input.prependListener('keypress', (_str: string, key: { name?: string; shift?: boolean }) => {
     if (key && key.name === 'tab' && key.shift && !closing) {
       currentMode = cycleMode(currentMode);
-      modeCyclePending = true;
       savePermissionMode(config.cwd, currentMode).catch(() => {});
+
+      // Overwrite mode line below cursor: down, clear line, write mode, back up
+      if (rl) {
+        const mstr = `${MODE_LABELS[currentMode].label}  ${MODE_LABELS[currentMode].desc}`;
+        writeOutput(`\x1b[B\r\x1b[2K${MODE_ANSI[currentMode]}${mstr}${RESET}\x1b[A\r`);
+      }
     }
   });
 
@@ -228,12 +232,11 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
   while (!closing) {
     let line: string;
     try {
-      if (modeCyclePending) {
-        modeCyclePending = false;
-        output.write(`${RESET}\n${style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`)}\n`);
-      }
-      output.write(`\n${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} `);
-      line = (await rl.question('> ')).trim();
+      // Write: > with background, mode line below, cursor back up for input
+      const mstr = `${MODE_LABELS[currentMode].label}  ${MODE_LABELS[currentMode].desc}`;
+      output.write(`\n${INV_BG}> `);
+      output.write(`\n${MODE_ANSI[currentMode]}${mstr}${RESET}\x1b[A`);
+      line = (await rl.question('')).trim();
     } catch {
       if (!closing) output.write(`\n${style.dim('Goodbye.')}\n`);
       break;
