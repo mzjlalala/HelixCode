@@ -2,17 +2,25 @@ import { gitDiffTool, gitStatusTool } from '../tools/git.js';
 import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesystem.js';
 import { classifyShellCommand } from '../tools/shell.js';
 import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '../llm/types.js';
+import { parseToolRequest } from './tool-request.js';
 import type { ProjectInstruction } from '../core/config.js';
 
 export type AgentTurnResult =
-  | { type: 'final'; message: string }
+  | { type: 'final'; message: string; timeline?: TimingEntry[] }
   | {
       type: 'confirmation';
       tool: string;
       args: Record<string, unknown>;
       summary: string;
       tool_call_id: string;
+      timeline?: TimingEntry[];
     };
+
+export interface TimingEntry {
+  label: string;
+  totalMs: number;
+  calls: number;
+}
 
 export type ConfirmedToolResult =
   | { ok: true; output: string }
@@ -159,11 +167,33 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   }
 ];
 
+class Timeline {
+  private entries = new Map<string, { totalMs: number; calls: number }>();
+
+  record(label: string, durationMs: number): void {
+    const existing = this.entries.get(label) ?? { totalMs: 0, calls: 0 };
+    existing.totalMs += durationMs;
+    existing.calls += 1;
+    this.entries.set(label, existing);
+  }
+
+  snapshot(): TimingEntry[] {
+    return [...this.entries.entries()]
+      .map(([label, data]) => ({ label, totalMs: data.totalMs, calls: data.calls }))
+      .sort((a, b) => b.totalMs - a.totalMs);
+  }
+
+  reset(): void {
+    this.entries.clear();
+  }
+}
+
 const CONFIRMED_TOOLS = new Set(TOOL_DEFINITIONS.filter((t) => t.confirm).map((t) => t.name));
 
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
   private readonly plan: PlanItem[] = [];
+  private readonly timeline = new Timeline();
 
   constructor(private readonly options: {
     cwd: string;
@@ -174,6 +204,7 @@ export class TerminalAgent {
   }) {}
 
   async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
+    this.timeline.reset();
     return this.completeTurn([{ role: 'user', content: input }], true, options?.signal);
   }
 
@@ -240,12 +271,21 @@ export class TerminalAgent {
     let isFirstTurn = streamFirst;
 
     for (let i = 0; i < 6; i += 1) {
+      const llmStart = performance.now();
       const result = await this.getLLMResponse(messages, isFirstTurn, signal);
       isFirstTurn = false;
 
-      // Display reasoning if available (non-streaming path)
+      // Record LLM timing right after response (before reasoning display,
+      // which includes artificial setTimeout(0) delays)
+      this.timeline.record('llm', performance.now() - llmStart);
+
+      // Display reasoning if available (non-streaming path) — stream it word-by-word
       if (result.reasoning_content && this.options.onReasoning) {
-        this.options.onReasoning(result.reasoning_content);
+        const words = result.reasoning_content.split(/(?<=\s)/);
+        for (const word of words) {
+          this.options.onReasoning(word);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
       }
 
       // Native tool calls from the provider
@@ -269,15 +309,16 @@ export class TerminalAgent {
                 tool_call_id: call.id
               });
               this.appendHistory(turnMessages);
-              return { type: 'final', message: risk.reason ?? 'Command blocked.' };
+              return { type: 'final', message: risk.reason ?? 'Command blocked.', timeline: this.timeline.snapshot() };
             }
             this.appendHistory(turnMessages);
             return {
               type: 'confirmation',
               tool: 'run_shell',
               args: { command },
-              summary: `Run shell command: ${command}`,
-              tool_call_id: call.id
+              summary: toolSummary('run_shell', { command }),
+              tool_call_id: call.id,
+              timeline: this.timeline.snapshot()
             };
           }
 
@@ -288,7 +329,8 @@ export class TerminalAgent {
               tool: call.name,
               args: call.arguments,
               summary: toolSummary(call.name, call.arguments),
-              tool_call_id: call.id
+              tool_call_id: call.id,
+              timeline: this.timeline.snapshot()
             };
           }
 
@@ -312,14 +354,54 @@ export class TerminalAgent {
         continue;
       }
 
-      // Text response — return as final
+      // Text response — check for legacy JSON protocol fallback
+      const request = parseToolRequest(result.content);
+      if (!request) {
+        turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
+        this.appendHistory(turnMessages);
+        return { type: 'final', message: result.content, timeline: this.timeline.snapshot() };
+      }
+
+      // Legacy JSON protocol fallback (for models that don't support native tool calling)
       turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
-      this.appendHistory(turnMessages);
-      return { type: 'final', message: result.content };
+
+      if (CONFIRMED_TOOLS.has(request.tool)) {
+        if (request.tool === 'run_shell') {
+          const command = String(request.args?.command ?? '').trim();
+          const risk = classifyShellCommand(command);
+          if (risk.risk === 'blocked') {
+            turnMessages.push({
+              role: 'tool',
+              content: JSON.stringify({ ok: false, error: risk.reason ?? 'Command blocked.' })
+            });
+            this.appendHistory(turnMessages);
+            return { type: 'final', message: risk.reason ?? 'Command blocked.', timeline: this.timeline.snapshot() };
+          }
+        }
+        this.appendHistory(turnMessages);
+        return {
+          type: 'confirmation',
+          tool: request.tool,
+          args: request.args ?? {},
+          summary: toolSummary(request.tool, request.args ?? {}),
+          tool_call_id: '',
+          timeline: this.timeline.snapshot()
+        };
+      }
+
+      const observation = await this.executeTool({ id: '', name: request.tool, arguments: request.args ?? {} });
+      turnMessages.push({ role: 'tool', content: observation, tool_call_id: '' });
+      messages.splice(
+        0,
+        messages.length,
+        { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
+        ...this.history,
+        ...turnMessages
+      );
     }
 
     this.appendHistory(turnMessages);
-    return { type: 'final', message: 'HelixCode stopped after too many tool rounds.' };
+    return { type: 'final', message: 'HelixCode stopped after too many tool rounds.', timeline: this.timeline.snapshot() };
   }
 
   private async getLLMResponse(
@@ -337,33 +419,38 @@ export class TerminalAgent {
   }
 
   private async executeTool(call: ToolCall): Promise<string> {
-    const args = call.arguments;
+    const start = performance.now();
+    try {
+      const args = call.arguments;
 
-    if (call.name === 'read_file') {
-      return JSON.stringify(await readFileTool(this.options.cwd, {
-        path: args.path, startLine: args.startLine, endLine: args.endLine
-      }));
-    }
-    if (call.name === 'search_files') {
-      return JSON.stringify(await searchFilesTool(this.options.cwd, {
-        query: args.query, glob: args.glob, caseSensitive: args.caseSensitive,
-        maxResults: args.maxResults, contextLines: args.contextLines
-      }));
-    }
-    if (call.name === 'list_files') {
-      return JSON.stringify(await listFilesTool(this.options.cwd));
-    }
-    if (call.name === 'git_status') {
-      return await gitStatusTool(this.options.cwd);
-    }
-    if (call.name === 'git_diff') {
-      return await gitDiffTool(this.options.cwd);
-    }
-    if (call.name === 'update_plan') {
-      return JSON.stringify(this.updatePlan(args));
-    }
+      if (call.name === 'read_file') {
+        return JSON.stringify(await readFileTool(this.options.cwd, {
+          path: args.path, startLine: args.startLine, endLine: args.endLine
+        }));
+      }
+      if (call.name === 'search_files') {
+        return JSON.stringify(await searchFilesTool(this.options.cwd, {
+          query: args.query, glob: args.glob, caseSensitive: args.caseSensitive,
+          maxResults: args.maxResults, contextLines: args.contextLines
+        }));
+      }
+      if (call.name === 'list_files') {
+        return JSON.stringify(await listFilesTool(this.options.cwd));
+      }
+      if (call.name === 'git_status') {
+        return await gitStatusTool(this.options.cwd);
+      }
+      if (call.name === 'git_diff') {
+        return await gitDiffTool(this.options.cwd);
+      }
+      if (call.name === 'update_plan') {
+        return JSON.stringify(this.updatePlan(args));
+      }
 
-    return JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
+      return JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
+    } finally {
+      this.timeline.record(call.name, performance.now() - start);
+    }
   }
 
   private updatePlan(args: Record<string, unknown>): { ok: true; plan: PlanItem[] } | { ok: false; error: string } {
@@ -411,7 +498,11 @@ export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): st
     'Do NOT use Markdown formatting (**, ##, |table|, ---, `code`) in your responses.',
     'Output plain text suitable for terminal display. Use simple indentation for structure.',
     'Use the provided tools to inspect and modify the codebase.',
-    'Reply normally when no tool is needed.',
+    'When asked to analyze or work on the project, start by exploring with read_file, search_files, or list_files.',
+    'Only reply with text when you already have all the information needed and no action is required.',
+    'If you are unsure about the project structure, use list_files or search_files instead of guessing.',
+    'Your chain-of-thought belongs in tool calls, not in text replies. When you need information, call a tool.',
+    'After reasoning or thinking through a problem, you must still output tool calls to act — reasoning alone does not explore files or run commands.',
     'Before editing, inspect the relevant files with read_file or search_files.',
     'Prefer search_files for finding code, symbols, or text across the project.',
     'Use update_plan for multi-step work, keeping exactly one item in_progress when a plan is useful.',

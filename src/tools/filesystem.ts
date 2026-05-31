@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
+import picomatch from 'picomatch';
 
 export type FileToolResult =
   | { ok: true; content: string }
@@ -242,11 +243,16 @@ function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
+const globMatchers = new Map<string, (test: string) => boolean>();
+
 function matchesGlob(path: string, glob: string): boolean {
   const pattern = glob.trim().replace(/\\/g, '/');
-  if (pattern.startsWith('*.')) return path.endsWith(pattern.slice(1));
-  if (pattern.endsWith('/*')) return path.startsWith(pattern.slice(0, -1));
-  return path === pattern;
+  let matcher = globMatchers.get(pattern);
+  if (!matcher) {
+    matcher = picomatch(pattern, { dot: true });
+    globMatchers.set(pattern, matcher);
+  }
+  return matcher(path);
 }
 
 function countOccurrences(content: string, needle: string): number {

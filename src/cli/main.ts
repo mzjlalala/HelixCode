@@ -13,7 +13,7 @@ import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS } from './slash-commands.js';
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
-import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
+import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.js';
 import { showWelcome, style, SYMBOL } from './style.js';
 
 // Top-level error boundary
@@ -60,6 +60,38 @@ program
 let currentAbort: AbortController | null = null;
 let streamedThisTurn = false;
 let lastOutput: 'reasoning' | 'content' | null = null;
+let turnStartMs = 0;
+let cliTimings: TimingEntry[] = [];
+let timerInterval: ReturnType<typeof setInterval> | null = null;
+let timerFrame = 0;
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function startTimer(): void {
+  timerFrame = 0;
+  const update = () => {
+    const elapsed = (performance.now() - turnStartMs) / 1000;
+    output.write(`\r${style.dim(`${SPINNER[timerFrame]} ${elapsed.toFixed(1)}s`)}`);
+    timerFrame = (timerFrame + 1) % SPINNER.length;
+  };
+  update();
+  timerInterval = setInterval(update, 200);
+}
+
+function stopTimer(): void {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+}
+
+function stopTimerAndClear(): void {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+    const elapsed = (performance.now() - turnStartMs) / 1000;
+    output.write(`\r${style.dim(`⠿ ${elapsed.toFixed(1)}s`)}`);
+  }
+}
 
 // Strip Markdown formatting for non-streamed output
 function stripMarkdown(text: string): string {
@@ -84,7 +116,11 @@ export async function runOnce(
 ): Promise<void> {
   const context = await createRuntimeContext(cwd, options.model);
   if (!context) return;
+  turnStartMs = performance.now();
+  cliTimings = [];
+  startTimer();
   const result = await context.agent.run(prompt);
+  stopTimerAndClear();
   await handleAgentResult(result, {
     agent: context.agent,
     config: context.config,
@@ -92,6 +128,7 @@ export async function runOnce(
     autoConfirm: options.autoConfirm === true,
     remainingTurns: options.maxTurns ?? 10
   });
+  stopTimer(); // safety cleanup
   output.write(`${style.info(await createOneShotGitSummary(context.config.cwd))}\n`);
 }
 
@@ -195,13 +232,23 @@ async function handleInputLine(
   currentAbort = abort;
   streamedThisTurn = false;
   lastOutput = null;
+  turnStartMs = performance.now();
+  cliTimings = [];
+  startTimer();
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
+    stopTimerAndClear();
     if (result.type === 'final' && abort.signal.aborted) {
+      const partialTotal = performance.now() - turnStartMs;
+      const timeline = result.timeline ?? [];
+      if (timeline.length > 0) {
+        output.write(`${formatTimeline(timeline, partialTotal)}\n`);
+      }
       return false;
     }
     await handleAgentResult(result, context);
   } finally {
+    stopTimer();
     if (currentAbort === abort) currentAbort = null;
   }
   return false;
@@ -221,10 +268,17 @@ async function handleAgentResult(
     const message = !streamedThisTurn ? stripMarkdown(result.message) : '';
     if (!streamedThisTurn) {
       const prefix = lastOutput ? '\n' : '';
-      output.write(`${prefix}${style.bold('  HelixCode')}\n${message}\n`);
+      output.write(`${prefix}${message}\n`);
     } else {
       output.write('\n');
     }
+    // Display timing timeline
+    const merged = mergeAgentTimeline(result.timeline, cliTimings);
+    const totalWallClock = performance.now() - turnStartMs;
+    if (merged.length > 0 || cliTimings.length > 0) {
+      output.write(`${formatTimeline(merged, totalWallClock)}\n`);
+    }
+    cliTimings = [];
     streamedThisTurn = false;
     lastOutput = null;
     return;
@@ -241,6 +295,12 @@ async function handleAgentResult(
   if (!context.rl && context.autoConfirm !== true) {
     output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.dim('Command skipped in non-interactive mode.')}\n`);
     context.agent.recordSkippedConfirmation(result);
+    const partialTotal = performance.now() - turnStartMs;
+    const timeline = result.timeline ?? [];
+    if (timeline.length > 0) {
+      output.write(`${formatTimeline(timeline, partialTotal)}\n`);
+    }
+    cliTimings = [];
     return;
   }
 
@@ -248,10 +308,18 @@ async function handleAgentResult(
     const remainingTurns = context.remainingTurns ?? 10;
     if (remainingTurns <= 0) {
       output.write(`${style.yellow(`${SYMBOL.warning} Stopped after reaching --max-turns.`)}\n`);
+      const partialTotal = performance.now() - turnStartMs;
+      const timeline = result.timeline ?? [];
+      if (timeline.length > 0) {
+        output.write(`${formatTimeline(timeline, partialTotal)}\n`);
+      }
+      cliTimings = [];
       return;
     }
     output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.green('Auto-approved by --yes.')}\n`);
+    const toolStart = performance.now();
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    cliTimings.push({ label: result.tool, totalMs: performance.now() - toolStart, calls: 1 });
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
     await handleAgentResult(followUp, { ...context, remainingTurns: remainingTurns - 1 });
@@ -262,19 +330,66 @@ async function handleAgentResult(
   if (!rl) return;
   const answer = (await rl.question(`${style.dim('Proceed? [y/N]')} `)).trim().toLowerCase();
   if (answer === 'y' || answer === 'yes') {
+    const toolStart = performance.now();
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    cliTimings.push({ label: result.tool, totalMs: performance.now() - toolStart, calls: 1 });
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
     await handleAgentResult(followUp, context);
   } else {
     context.agent.recordSkippedConfirmation(result);
     output.write(`${style.dim('Skipped.')}\n`);
+    // Show partial timeline on skip
+    const partialTimeline = result.timeline ?? [];
+    const partialTotal = performance.now() - turnStartMs;
+    if (partialTimeline.length > 0) {
+      output.write(`${formatTimeline(partialTimeline, partialTotal)}\n`);
+    }
+    cliTimings = [];
   }
 }
 
 function formatConfirmedToolResult(result: ConfirmedToolResult): string {
   if (!result.ok) return `${style.error(`${SYMBOL.error} ${result.error}`)}`;
   return `${style.success(`${SYMBOL.success} ${result.output}`)}`;
+}
+
+function mergeAgentTimeline(agentTimeline: TimingEntry[] | undefined, cliTimings: TimingEntry[]): TimingEntry[] {
+  const map = new Map<string, TimingEntry>();
+
+  for (const entry of agentTimeline ?? []) {
+    map.set(entry.label, { ...entry });
+  }
+
+  for (const entry of cliTimings) {
+    const existing = map.get(entry.label);
+    if (existing) {
+      existing.totalMs += entry.totalMs;
+      existing.calls += entry.calls;
+    } else {
+      map.set(entry.label, { ...entry });
+    }
+  }
+
+  return [...map.values()].sort((a, b) => b.totalMs - a.totalMs);
+}
+
+function formatTimeline(entries: TimingEntry[], totalMs: number): string {
+  const total = (totalMs / 1000).toFixed(1);
+
+  // Only LLM calls, no tool calls → just show total
+  const hasTools = entries.some((e) => e.label !== 'llm');
+  if (!hasTools) {
+    return style.dim(`⏱ ${total}s`);
+  }
+
+  // Show detailed timeline
+  const parts = entries.map((e) => {
+    const time = (e.totalMs / 1000).toFixed(1);
+    return e.calls > 1 ? `${e.label} ${time}s (${e.calls})` : `${e.label} ${time}s`;
+  });
+
+  return style.dim(`⏱ ${total}s · ${parts.join(' · ')}`);
 }
 
 async function createRuntimeContext(cwd: string, modelOverride?: string): Promise<{
@@ -301,12 +416,14 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     provider,
     projectInstructions,
     onToken: (token) => {
+      stopTimerAndClear(); // Clear real-time timer before first streaming token
       streamedThisTurn = true;
       if (lastOutput === 'reasoning') output.write('\n');
       lastOutput = 'content';
       output.write(token);
     },
     onReasoning: (text) => {
+      stopTimerAndClear(); // Clear real-time timer before first reasoning token
       if (lastOutput === 'content') output.write('\n');
       lastOutput = 'reasoning';
       output.write(`\x1b[2m\x1b[3m${text}\x1b[0m`);
