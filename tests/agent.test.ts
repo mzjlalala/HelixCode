@@ -241,4 +241,41 @@ describe('TerminalAgent', () => {  it('guides the model through a coding-agent t
       expect(provider.calls.at(-1)?.some((message) => message.role === 'tool')).toBe(true);
     }
   });
+
+  it('loadHistory adds messages to agent state', () => {
+    const provider = new ScriptedProvider([]);
+    const agent = new TerminalAgent({ cwd: '/test', provider });
+    expect(agent.historySize()).toBe(0);
+
+    agent.loadHistory([
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi' },
+    ]);
+    expect(agent.historySize()).toBe(2);
+  });
+
+  it('loadHistory filters out system and tool messages', () => {
+    const provider = new ScriptedProvider([]);
+    const agent = new TerminalAgent({ cwd: '/test', provider });
+
+    agent.loadHistory([
+      { role: 'system', content: 'be helpful' },
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi', tool_calls: [] },
+      { role: 'tool', content: 'result', tool_call_id: '1' },
+    ]);
+    expect(agent.historySize()).toBe(2); // only user + assistant
+  });
+
+  it('getHistory returns a copy of history', () => {
+    const provider = new ScriptedProvider([]);
+    const agent = new TerminalAgent({ cwd: '/test', provider });
+    agent.loadHistory([{ role: 'user', content: 'Hello' }]);
+
+    const copy = agent.getHistory();
+    expect(copy).toHaveLength(1);
+    // Mutating the copy should not affect internal state
+    copy.push({ role: 'assistant', content: 'added' });
+    expect(agent.getHistory()).toHaveLength(1);
+  });
 });

@@ -249,12 +249,27 @@ export class TerminalAgent {
     return this.history.length;
   }
 
+  /** Get a copy of all history messages (for persistence) */
+  getHistory(): ChatMessage[] {
+    return [...this.history];
+  }
+
   compactHistory(keepMessages = 20): number {
     const keep = Math.max(0, Math.floor(keepMessages));
     if (this.history.length > keep) {
       this.history.splice(0, this.history.length - keep);
     }
     return this.history.length;
+  }
+
+  /** Load persisted history messages (user/assistant pairs) into agent history */
+  loadHistory(messages: ChatMessage[]): void {
+    const filtered = messages.filter(
+      (m) => m.role === 'user' || m.role === 'assistant'
+    );
+    if (filtered.length > 0) {
+      this.history.push(...filtered);
+    }
   }
 
   currentPlan(): PlanItem[] {

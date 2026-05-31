@@ -6,11 +6,12 @@ import type { CompleterResult } from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
 import { writeSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { execFile } from 'node:child_process';
+import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, loadProjectInstructions } from '../core/config.js';
+import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, savePermissionMode } from '../core/config.js';
+import { loadHistory, saveHistory } from '../core/history-store.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS } from './slash-commands.js';
@@ -18,6 +19,11 @@ import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-a
 import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.js';
 import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
+
+// On Windows, set console to UTF-8 for Unicode characters (spinner, logo, symbols)
+if (process.platform === 'win32') {
+  try { execSync('chcp.com 65001 > nul', { windowsHide: true }); } catch { /* best-effort */ }
+}
 
 const INV_BG = '\x1b[48;5;236m\x1b[38;5;255m';
 const FG_RESTORE = '\x1b[38;5;255m';
@@ -44,9 +50,10 @@ program
   .option('-y, --yes', 'Automatically execute confirmed actions in one-shot mode')
   .option('--max-turns <number>', 'Maximum one-shot confirmation turns', '10')
   .option('--model <name>', 'Chat model to use (overrides HELIX_CHAT_MODEL)')
+  .option('--mode <name>', 'Permission mode: default|edit|plan|auto')
   .argument('[prompt...]', 'Task to run once without starting the REPL')
   .action(async (promptParts: string[], options: {
-    cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string; model?: string
+    cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string; model?: string; mode?: string
   }) => {
     if (options.doctor) {
       output.write(`${await createDoctorOutput(options.cwd)}\n`);
@@ -61,7 +68,7 @@ program
       });
       return;
     }
-    await runRepl(options.cwd, options.model);
+    await runRepl(options.cwd, options.model, options.mode as PermissionMode | undefined);
   });
 
 let currentAbort: AbortController | null = null;
@@ -140,10 +147,20 @@ export async function runOnce(
   output.write(`${style.info(await createOneShotGitSummary(context.config.cwd))}\n`);
 }
 
-export async function runRepl(cwd: string, modelOverride?: string): Promise<void> {
+export async function runRepl(cwd: string, modelOverride?: string, modeOverride?: PermissionMode): Promise<void> {
   const context = await createRuntimeContext(cwd, modelOverride);
   if (!context) return;
   const { config, projectInstructions, runtime, agent } = context;
+
+  // Load initial permission mode: CLI --mode > .helix/config.json > default
+  currentMode = modeOverride ?? (await loadPermissionMode(config.cwd)) ?? 'default';
+
+  // Load persisted history
+  const savedMessages = await loadHistory(config.cwd);
+  if (savedMessages.length > 0) {
+    agent.loadHistory(savedMessages);
+    output.write(`Restored session: ${savedMessages.length} messages from .helix/history.json\n`);
+  }
 
   showWelcome(config.cwd, modelOverride ? runtime.model : '', SLASH_COMMANDS.map((c) => c.name).join(' '));
   if (projectInstructions.length) {
@@ -173,6 +190,8 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
     if (key && key.name === 'tab' && key.shift && !closing) {
       currentMode = cycleMode(currentMode);
       modeCyclePending = true;
+      // Persist mode to config file
+      savePermissionMode(config.cwd, currentMode).catch(() => {});
 
       // Redraw prompt immediately with new mode tag (no newline)
       if (rl) {
@@ -194,6 +213,7 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
     }
     closing = true;
     output.write(`\n${style.dim('Goodbye.')}\n`);
+    saveHistory(config.cwd, agent.getHistory()).catch(() => {});
     rl.close();
   });
 
@@ -246,6 +266,7 @@ async function handleInputLine(
     provider: context.config.provider,
     apiKeyConfigured: Boolean(context.config.apiKey.trim()),
     historyMessages: context.agent.historySize(),
+    historyMessageList: context.agent.getHistory(),
     projectInstructions: context.projectInstructions.map((item) => item.path),
     planItems: context.agent.currentPlan(),
     compactedHistoryMessages: 20
@@ -257,11 +278,16 @@ async function handleInputLine(
     if (slash.cycleMode) {
       currentMode = cycleMode(currentMode);
       slash.output = style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`);
+      // Persist mode to config file
+      savePermissionMode(context.config.cwd, currentMode).catch(() => {});
     }
     if (slash.compact) {
       context.agent.compactHistory(slash.compactKeep ?? 20);
     }
     output.write(`${slash.output}\n`);
+    if (slash.historySave) {
+      saveHistory(context.config.cwd, context.agent.getHistory()).catch(() => {});
+    }
     if (slash.clear || slash.reset) {
       context.agent.clearHistory();
     }
@@ -294,6 +320,8 @@ async function handleInputLine(
     stopTimer();
     if (currentAbort === abort) currentAbort = null;
   }
+  // Auto-save history after each turn
+  saveHistory(context.config.cwd, context.agent.getHistory()).catch(() => {});
   return false;
 }
 
@@ -543,6 +571,10 @@ export function formatMissingApiKeyMessage(): string {
 export async function createDoctorOutput(cwd: string): Promise<string> {
   const config = loadConfig({ cwd });
   const projectInstructions = await loadProjectInstructions(config.cwd);
+  const fileConfig = await loadFileConfig(config.cwd);
+  const fileConfigLines = Object.keys(fileConfig).length
+    ? [`config file: .helix/config.json (${Object.keys(fileConfig).length} keys)`, `  ${JSON.stringify(fileConfig)}`]
+    : ['config file: none (.helix/config.json not found)'];
   return formatDoctor({
     cwd: config.cwd,
     model: config.model,
@@ -552,7 +584,7 @@ export async function createDoctorOutput(cwd: string): Promise<string> {
     historyMessages: 0,
     projectInstructions: projectInstructions.map((item) => item.path),
     planItems: []
-  });
+  }) + '\n' + fileConfigLines.join('\n');
 }
 
 async function readAllStdin(): Promise<string> {

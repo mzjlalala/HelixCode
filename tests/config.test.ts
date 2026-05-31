@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadConfig, loadProjectInstructions } from '../src/core/config.js';
+import { loadConfig, loadProjectInstructions, loadFileConfig, saveFileConfig, loadPermissionMode, savePermissionMode, mergeFileConfig } from '../src/core/config.js';
 
 const originalEnv = { ...process.env };
 
@@ -74,5 +74,82 @@ describe('loadProjectInstructions', () => {
       { path: 'AGENTS.md', content: 'Use JDK 17 from C:/DevelopTool/JDK17.\n' },
       { path: '.helix/instructions.md', content: 'Prefer small tests.\n' }
     ]);
+  });
+});
+
+describe('config file (.helix/config.json)', () => {
+  it('loadFileConfig returns empty when no config file exists', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-filecfg-'));
+    const config = await loadFileConfig(cwd);
+    expect(config).toEqual({});
+  });
+
+  it('loadFileConfig reads an existing config file', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-filecfg-'));
+    await mkdir(join(cwd, '.helix'), { recursive: true });
+    await writeFile(
+      join(cwd, '.helix', 'config.json'),
+      JSON.stringify({ model: 'gpt-4o-mini', permissionMode: 'auto' }),
+      'utf8'
+    );
+
+    const config = await loadFileConfig(cwd);
+    expect(config.model).toBe('gpt-4o-mini');
+    expect(config.permissionMode).toBe('auto');
+  });
+
+  it('saveFileConfig creates and merges config file', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-filecfg-'));
+    await mkdir(join(cwd, '.helix'), { recursive: true });
+
+    // Save first field
+    await saveFileConfig(cwd, { permissionMode: 'plan' });
+    let config = await loadFileConfig(cwd);
+    expect(config.permissionMode).toBe('plan');
+
+    // Save second field — first field preserved
+    await saveFileConfig(cwd, { model: 'custom-model' });
+    config = await loadFileConfig(cwd);
+    expect(config.permissionMode).toBe('plan');
+    expect(config.model).toBe('custom-model');
+  });
+
+  it('loadPermissionMode returns undefined when no config', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-filecfg-'));
+    expect(await loadPermissionMode(cwd)).toBeUndefined();
+  });
+
+  it('savePermissionMode persists the mode', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-filecfg-'));
+    await savePermissionMode(cwd, 'acceptEdits');
+    const mode = await loadPermissionMode(cwd);
+    expect(mode).toBe('acceptEdits');
+  });
+
+  it('mergeFileConfig does not override env-set model', async () => {
+    process.env.HELIX_CHAT_MODEL = 'env-model';
+    const base = loadConfig({ cwd: '/test' });
+    // File config model should NOT override env variable
+    const merged = mergeFileConfig(base, { model: 'file-model' });
+    expect(merged.model).toBe('env-model');
+    delete process.env.HELIX_CHAT_MODEL;
+  });
+
+  it('mergeFileConfig applies file model when no env override', async () => {
+    delete process.env.HELIX_CHAT_MODEL;
+    delete process.env.HELIX_MODEL;
+    const base = loadConfig({ cwd: '/test' });
+    const merged = mergeFileConfig(base, { model: 'file-model' });
+    expect(merged.model).toBe('file-model');
+  });
+
+  it('loadProjectInstructions honors config file instructions paths', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-instr-'));
+    await mkdir(join(cwd, '.helix'), { recursive: true });
+    await writeFile(join(cwd, '.helix', 'config.json'), JSON.stringify({ instructions: ['CUSTOM.md'] }), 'utf8');
+    await writeFile(join(cwd, 'CUSTOM.md'), 'Custom instruction.', 'utf8');
+
+    const instructions = await loadProjectInstructions(cwd);
+    expect(instructions).toEqual([{ path: 'CUSTOM.md', content: 'Custom instruction.' }]);
   });
 });

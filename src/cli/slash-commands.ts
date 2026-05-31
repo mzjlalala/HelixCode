@@ -1,4 +1,5 @@
 import type { PlanItem } from '../agent/terminal-agent.js';
+import type { ChatMessage } from '../llm/types.js';
 
 export interface SlashCommandDefinition {
   name: string;
@@ -12,7 +13,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: '/doctor', description: 'Show local HelixCode diagnostics' },
   { name: '/model', description: 'Show or switch the current chat model', usage: '/model <name>' },
   { name: '/mode', description: 'Cycle permission mode (default/edit/plan/auto)' },
-  { name: '/history', description: 'Show current session history size' },
+  { name: '/history', description: 'Show history size, search, or save', usage: '/history [search <keyword>|save]' },
   { name: '/plan', description: 'Show current session plan' },
   { name: '/compact', description: 'Compact session history', usage: '/compact [keep]' },
   { name: '/tools', description: 'Show available agent tools' },
@@ -55,6 +56,7 @@ export type SlashCommandResult =
       compactKeep?: number;
       model?: string;
       cycleMode?: true;
+      historySave?: true;
     }
   | { handled: false };
 
@@ -65,6 +67,7 @@ export interface SlashCommandContext {
   provider?: string;
   apiKeyConfigured?: boolean;
   historyMessages?: number;
+  historyMessageList?: ChatMessage[];
   projectInstructions?: string[];
   planItems?: PlanItem[];
   compactedHistoryMessages?: number;
@@ -185,11 +188,54 @@ export function handleSlashCommand(
     };
   }
 
-  if (command === '/history') {
+  if (command === '/history' || command.startsWith('/history ')) {
+    const rest = command === '/history' ? '' : command.slice('/history '.length).trim();
+
+    // /history save
+    if (rest === 'save') {
+      return {
+        handled: true, exit: false, clear: false,
+        historySave: true,
+        output: `Session history saved.`
+      };
+    }
+
+    // /history search <keyword>
+    if (rest.startsWith('search ')) {
+      const keyword = rest.slice('search '.length).trim();
+      if (!keyword) {
+        return {
+          handled: true, exit: false, clear: false,
+          output: 'Usage: /history search <keyword>'
+        };
+      }
+      const messages = context.historyMessageList ?? [];
+      const results = messages
+        .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content && m.content.toLowerCase().includes(keyword.toLowerCase()))
+        .map((m) => {
+          const role = m.role === 'user' ? 'Q' : 'A';
+          // Truncate long content for display
+          const text = (m.content ?? '').length > 120
+            ? (m.content ?? '').slice(0, 120) + '...'
+            : (m.content ?? '');
+          return `[${role}] ${text}`;
+        });
+      if (results.length === 0) {
+        return {
+          handled: true, exit: false, clear: false,
+          output: `No history matches for "${keyword}".`
+        };
+      }
+      const heading = `Found ${results.length} match(es) for "${keyword}":`;
+      return {
+        handled: true, exit: false, clear: false,
+        output: [heading, ...results].join('\n')
+      };
+    }
+
+    // /history (plain)
     return {
-      handled: true,
-      exit: false,
-      clear: false,
+      handled: true, exit: false, clear: false,
       output: `Session history messages: ${context.historyMessages ?? 0}`
     };
   }

@@ -1,6 +1,7 @@
 import 'dotenv/config';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
+import type { PermissionMode } from '../cli/permission-mode.js';
 
 export type LlmProvider = 'openai' | 'deepseek' | 'custom';
 
@@ -13,10 +14,21 @@ export interface HelixConfig {
   baseURL: string;
 }
 
+export interface HelixFileConfig {
+  /** Default chat model. CLI `--model` flag overrides this. */
+  model?: string;
+  /** Permission mode: default | acceptEdits | plan | auto */
+  permissionMode?: PermissionMode;
+  /** Paths to project instruction files, relative to project root */
+  instructions?: string[];
+}
+
 export interface ProjectInstruction {
   path: string;
   content: string;
 }
+
+const CONFIG_FILENAME = '.helix/config.json';
 
 export function loadConfig(options: { cwd?: string } = {}): HelixConfig {
   const provider = normalizeProvider(process.env.HELIX_PROVIDER);
@@ -30,6 +42,49 @@ export function loadConfig(options: { cwd?: string } = {}): HelixConfig {
     model: process.env.HELIX_CHAT_MODEL ?? process.env.HELIX_MODEL ?? defaults.model,
     baseURL: process.env.HELIX_BASE_URL ?? defaults.baseURL
   };
+}
+
+/** Load the file-based config from .helix/config.json */
+export async function loadFileConfig(cwd: string): Promise<HelixFileConfig> {
+  try {
+    const content = await readFile(resolve(cwd, CONFIG_FILENAME), 'utf8');
+    const parsed = JSON.parse(content) as HelixFileConfig;
+    return parsed;
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'ENOENT') return {};
+    throw error;
+  }
+}
+
+/** Merge file config into env-based config (file config takes precedence) */
+export function mergeFileConfig(base: HelixConfig, file: HelixFileConfig): HelixConfig {
+  if (file.model && !process.env.HELIX_CHAT_MODEL && !process.env.HELIX_MODEL) {
+    base.model = file.model;
+  }
+  return base;
+}
+
+/** Save/update .helix/config.json, preserving existing fields */
+export async function saveFileConfig(
+  cwd: string,
+  partial: Partial<HelixFileConfig>
+): Promise<HelixFileConfig> {
+  const current = await loadFileConfig(cwd);
+  const merged: HelixFileConfig = { ...current, ...partial };
+  const target = resolve(cwd, CONFIG_FILENAME);
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+  return merged;
+}
+
+export async function loadPermissionMode(cwd: string): Promise<PermissionMode | undefined> {
+  const config = await loadFileConfig(cwd);
+  return config.permissionMode;
+}
+
+export async function savePermissionMode(cwd: string, mode: PermissionMode): Promise<void> {
+  await saveFileConfig(cwd, { permissionMode: mode });
 }
 
 function normalizeProvider(value: string | undefined): LlmProvider {
@@ -61,10 +116,16 @@ function providerDefaults(provider: LlmProvider): { model: string; baseURL: stri
 }
 
 export async function loadProjectInstructions(cwd: string): Promise<ProjectInstruction[]> {
-  const instructionPaths = ['AGENTS.md', '.helix/instructions.md'];
   const instructions: ProjectInstruction[] = [];
 
-  for (const path of instructionPaths) {
+  // Load from .helix/config.json first if specified
+  const fileConfig = await loadFileConfig(cwd);
+  const configPaths = fileConfig.instructions ?? [];
+
+  // Default paths always checked
+  const allPaths = [...new Set([...configPaths, 'AGENTS.md', '.helix/instructions.md'])];
+
+  for (const path of allPaths) {
     try {
       const content = await readFile(resolve(cwd, path), 'utf8');
       if (content.trim()) instructions.push({ path, content });

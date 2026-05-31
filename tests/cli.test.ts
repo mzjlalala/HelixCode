@@ -156,6 +156,39 @@ describe('slash commands', () => {  it('completes slash commands by prefix with 
       expect(result.compactKeep).toBe(20);
     }
   });
+
+  it('/history save returns historySave flag', () => {
+    const result = handleSlashCommand('/history save', { historyMessages: 3 });
+    expect(result.handled).toBe(true);
+    if (result.handled) expect(result.historySave).toBe(true);
+  });
+
+  it('/history search finds matching messages', () => {
+    const result = handleSlashCommand('/history search hello', {
+      historyMessageList: [
+        { role: 'user', content: 'Hello world' },
+        { role: 'assistant', content: 'Hi there' },
+        { role: 'user', content: 'Goodbye' },
+      ]
+    });
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.output).toContain('Found 1 match');
+      expect(result.output).toContain('Hello world');
+    }
+  });
+
+  it('/history search with no matches returns message', () => {
+    const result = handleSlashCommand('/history search xyzzy', {
+      historyMessageList: [
+        { role: 'user', content: 'Hello' },
+      ]
+    });
+    expect(result.handled).toBe(true);
+    if (result.handled) {
+      expect(result.output).toContain('No history matches');
+    }
+  });
 });
 
 describe('one-shot prompt helpers', () => {
