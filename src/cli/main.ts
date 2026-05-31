@@ -14,13 +14,14 @@ import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS } from './slash-commands.js';
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult } from '../agent/terminal-agent.js';
+import { showWelcome, style, SYMBOL } from './style.js';
 
-// Top-level error boundary — catch crashes that would otherwise terminate the process silently
+// Top-level error boundary
 process.on('unhandledRejection', (reason) => {
-  output.write(`\nUnhandled error: ${reason instanceof Error ? reason.message : String(reason)}\n`);
+  output.write(`\n${style.error(`${SYMBOL.error} Unhandled error: ${reason instanceof Error ? reason.message : String(reason)}`)}\n`);
 });
 process.on('uncaughtException', (error) => {
-  output.write(`\nFatal error: ${error.message}\n`);
+  output.write(`\n${style.error(`${SYMBOL.error} Fatal error: ${error.message}`)}\n`);
 });
 
 const execFileAsync = promisify(execFile);
@@ -56,30 +57,9 @@ program
     await runRepl(options.cwd, options.model);
   });
 
-// Module-level state for Ctrl+C abort across functions
+// Module-level state
 let currentAbort: AbortController | null = null;
-
-
-// Simple spinner on stderr — returns stop() that clears the line
-let spinnerTimer: ReturnType<typeof setInterval> | null = null;
 let streamedThisTurn = false;
-
-function startSpinner(): void {
-  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  let i = 0;
-  spinnerTimer = setInterval(() => {
-    process.stderr.write(`\r${frames[i]}`);
-    i = (i + 1) % frames.length;
-  }, 80);
-}
-
-function stopSpinner(): void {
-  if (spinnerTimer !== null) {
-    clearInterval(spinnerTimer);
-    spinnerTimer = null;
-    process.stderr.write('\r\x1b[K');
-  }
-}
 
 export async function runOnce(
   cwd: string,
@@ -96,7 +76,7 @@ export async function runOnce(
     autoConfirm: options.autoConfirm === true,
     remainingTurns: options.maxTurns ?? 10
   });
-  output.write(`${await createOneShotGitSummary(context.config.cwd)}\n`);
+  output.write(`${style.info(await createOneShotGitSummary(context.config.cwd))}\n`);
 }
 
 export async function runRepl(cwd: string, modelOverride?: string): Promise<void> {
@@ -104,20 +84,14 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
   if (!context) return;
   const { config, projectInstructions, runtime, agent } = context;
 
-  output.write(`HelixCode ready in ${config.cwd}\n`);
+  showWelcome(config.cwd, modelOverride ? runtime.model : '', SLASH_COMMANDS.map((c) => c.name).join(' '));
   if (projectInstructions.length) {
     output.write(`Loaded project instructions: ${projectInstructions.map((item) => item.path).join(', ')}\n`);
   }
-  if (modelOverride) {
-    output.write(`Model: ${runtime.model}\n`);
-  }
-  output.write(`Commands: ${SLASH_COMMANDS.map((item) => item.name).join(' ')}\n`);
-  output.write('Type /help for details, /exit to quit.\n\n');
 
   if (!input.isTTY) {
     const content = await readAllStdin();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
-      output.write('helix> ');
       const exit = await handleInputLine(line, { agent, config, projectInstructions, runtime, rl: null });
       if (exit) return;
     }
@@ -139,24 +113,24 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
     if (currentAbort) {
       currentAbort.abort();
       currentAbort = null;
-      stopSpinner();
       output.write('\n');
       return;
     }
     closing = true;
-    output.write('\nGoodbye.\n');
+    output.write(`\n${style.dim('Goodbye.')}\n`);
     rl.close();
   });
 
   while (!closing) {
     let line: string;
     try {
-      line = (await rl.question('helix> ')).trim();
+      line = (await rl.question('> ')).trim();
     } catch {
-      if (!closing) output.write('\nGoodbye.\n');
+      if (!closing) output.write(`\n${style.dim('Goodbye.')}\n`);
       break;
     }
     if (!line) continue;
+    output.write(`\n`);
     if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl })) break;
   }
 
@@ -203,7 +177,6 @@ async function handleInputLine(
 
   const abort = new AbortController();
   currentAbort = abort;
-  startSpinner();
   streamedThisTurn = false;
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
@@ -212,7 +185,6 @@ async function handleInputLine(
     }
     await handleAgentResult(result, context);
   } finally {
-    stopSpinner();
     if (currentAbort === abort) currentAbort = null;
   }
   return false;
@@ -230,18 +202,24 @@ async function handleAgentResult(
 ): Promise<void> {
   if (result.type === 'final') {
     if (!streamedThisTurn) {
-      output.write(`${result.message}\n`);
+      output.write(`${style.bold('  HelixCode')}\n${result.message}\n`);
+    } else {
+      output.write('\n');
     }
     streamedThisTurn = false;
     return;
   }
 
+  // If text was streamed before the tool call, ensure a clean line before the preview
+  if (streamedThisTurn) output.write('\n');
+  streamedThisTurn = false;
+
+  output.write(`${style.label('┈')} ${style.bold(result.tool.replace(/_/g, ' '))}  ${style.dim(result.summary)}\n`);
   const preview = await previewConfirmedTool(context.config.cwd, result);
   output.write(`${preview}\n`);
 
   if (!context.rl && context.autoConfirm !== true) {
-    output.write(`${result.summary}? [y/N] Command skipped in non-interactive mode.
-`);
+    output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.dim('Command skipped in non-interactive mode.')}\n`);
     context.agent.recordSkippedConfirmation(result);
     return;
   }
@@ -249,10 +227,10 @@ async function handleAgentResult(
   if (!context.rl && context.autoConfirm === true) {
     const remainingTurns = context.remainingTurns ?? 10;
     if (remainingTurns <= 0) {
-      output.write('Stopped after reaching --max-turns.\n');
+      output.write(`${style.yellow(`${SYMBOL.warning} Stopped after reaching --max-turns.`)}\n`);
       return;
     }
-    output.write(`${result.summary}? [y/N] Auto-approved by --yes.\n`);
+    output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.green('Auto-approved by --yes.')}\n`);
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
@@ -262,7 +240,7 @@ async function handleAgentResult(
 
   const rl = context.rl;
   if (!rl) return;
-  const answer = (await rl.question(`${result.summary}? [y/N] `)).trim().toLowerCase();
+  const answer = (await rl.question(`${style.dim('Proceed? [y/N]')} `)).trim().toLowerCase();
   if (answer === 'y' || answer === 'yes') {
     const commandResult = await executeConfirmedTool(context.config.cwd, result);
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
@@ -270,13 +248,13 @@ async function handleAgentResult(
     await handleAgentResult(followUp, context);
   } else {
     context.agent.recordSkippedConfirmation(result);
-    output.write('Command skipped.\n');
+    output.write(`${style.dim('Skipped.')}\n`);
   }
 }
 
 function formatConfirmedToolResult(result: ConfirmedToolResult): string {
-  if (!result.ok) return `Result: failed\n${result.error}`;
-  return ['Result: ok', result.output].filter(Boolean).join('\n');
+  if (!result.ok) return `${style.error(`${SYMBOL.error} ${result.error}`)}`;
+  return `${style.success(`${SYMBOL.success} ${result.output}`)}`;
 }
 
 async function createRuntimeContext(cwd: string, modelOverride?: string): Promise<{
@@ -303,7 +281,6 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     provider,
     projectInstructions,
     onToken: (token) => {
-      stopSpinner();
       streamedThisTurn = true;
       output.write(token);
     }

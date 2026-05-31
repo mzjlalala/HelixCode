@@ -9,17 +9,18 @@ export interface ChatMessage {
   content: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  reasoning_content?: string | null;
 }
 
 export type ChatResult =
-  | { type: 'text'; content: string }
-  | { type: 'tool_calls'; calls: ToolCall[] };
+  | { type: 'text'; content: string; reasoning_content?: string | null }
+  | { type: 'tool_calls'; calls: ToolCall[]; reasoning_content?: string | null };
 
 export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  confirm?: boolean; // true = requires user confirmation
+  confirm?: boolean;
 }
 
 export interface ChatProvider {
@@ -28,6 +29,6 @@ export interface ChatProvider {
   completeStream?(
     messages: ChatMessage[],
     onToken: (token: string) => void,
-    options?: { signal?: AbortSignal }
-  ): Promise<string>;
+    options?: { signal?: AbortSignal; tools?: ToolDefinition[] }
+  ): Promise<ChatResult>;
 }

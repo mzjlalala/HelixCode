@@ -5,7 +5,6 @@ import type {
 import type { HelixConfig } from '../core/config.js';
 import type { ChatMessage, ChatProvider, ChatResult, ToolCall, ToolDefinition } from './types.js';
 
-// Response shape common to OpenAI and compatible providers
 interface ToolCallResponse {
   id: string;
   type?: string;
@@ -16,6 +15,7 @@ interface ChoiceResponse {
   message?: {
     content?: string | null;
     tool_calls?: ToolCallResponse[] | null;
+    reasoning_content?: string | null;
   };
 }
 
@@ -70,12 +70,16 @@ export class OpenAIChatProvider implements ChatProvider {
         params.tools = buildOpenAITools(tools);
         params.tool_choice = 'auto';
       }
+      if (this.config.provider === 'deepseek') {
+        params.extra_body = { thinking: { type: 'enabled' } };
+      }
 
       const response = await this.client.chat.completions.create(params);
       const choice = response.choices?.[0]?.message;
       if (!choice) return { type: 'text', content: '' };
 
-      // Native tool calls
+      const reasoning_content = choice.reasoning_content ?? null;
+
       if (choice.tool_calls && choice.tool_calls.length > 0) {
         const calls: ToolCall[] = choice.tool_calls
           .filter((tc) => !tc.type || tc.type === 'function')
@@ -84,10 +88,12 @@ export class OpenAIChatProvider implements ChatProvider {
             try { parsed = JSON.parse(tc.function.arguments); } catch { /* use empty */ }
             return { id: tc.id, name: tc.function.name, arguments: parsed };
           });
-        if (calls.length > 0) return { type: 'tool_calls', calls };
+        if (calls.length > 0) {
+          return { type: 'tool_calls', calls, reasoning_content };
+        }
       }
 
-      return { type: 'text', content: choice.content ?? '' };
+      return { type: 'text', content: choice.content ?? '', reasoning_content };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -105,43 +111,109 @@ export class OpenAIChatProvider implements ChatProvider {
   async completeStream(
     messages: ChatMessage[],
     onToken: (token: string) => void,
-    options?: { signal?: AbortSignal }
-  ): Promise<string> {
+    options?: { signal?: AbortSignal; tools?: ToolDefinition[] }
+  ): Promise<ChatResult> {
     if (!this.config.apiKey.trim()) {
-      return 'API key is not set.';
+      return { type: 'text', content: 'API key is not set.' };
     }
 
     try {
+      const createParams: Record<string, unknown> = {
+        model: this.runtime.model,
+        messages: toOpenAIMessages(messages),
+        temperature: 0.2,
+        stream: true
+      };
+
+      if ((options?.tools ?? []).length > 0) {
+        createParams.tools = buildOpenAITools(options!.tools!);
+        createParams.tool_choice = 'auto';
+      }
+
+      if (this.config.provider === 'deepseek') {
+        createParams.extra_body = { thinking: { type: 'enabled' } };
+      }
+
       const stream = await (this.client as unknown as OpenAI).chat.completions.create(
-        {
-          model: this.runtime.model,
-          messages: toOpenAIMessages(messages) as ChatCompletionMessageParam[],
-          temperature: 0.2,
-          stream: true
-        },
+        createParams as any,
         { signal: options?.signal }
-      ) as AsyncIterable<{
-        choices?: Array<{ delta?: { content?: string | null } }>;
+      ) as unknown as AsyncIterable<{
+        choices?: Array<{
+          delta?: {
+            content?: string | null;
+            tool_calls?: Array<{
+              index: number;
+              id?: string;
+              type?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }>;
       }>;
 
       let fullContent = '';
+      const accumulatedCalls: Map<number, {
+        id: string;
+        name: string;
+        args: string;
+      }> = new Map();
+      let hasToolCalls = false;
+
       for await (const chunk of stream) {
-        const delta = chunk.choices?.[0]?.delta?.content;
-        if (delta) {
-          onToken(delta);
-          fullContent += delta;
+        const delta = chunk.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        // Stream text tokens
+        if (delta.content) {
+          onToken(delta.content);
+          fullContent += delta.content;
+        }
+
+        // Accumulate tool_calls from stream deltas
+        if (delta.tool_calls) {
+          hasToolCalls = true;
+          for (const tc of delta.tool_calls) {
+            const existing = accumulatedCalls.get(tc.index) ?? {
+              id: '',
+              name: '',
+              args: ''
+            };
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name = tc.function.name;
+            if (tc.function?.arguments) existing.args += tc.function.arguments;
+            accumulatedCalls.set(tc.index, existing);
+          }
         }
       }
-      return fullContent;
+
+      // Return tool_calls if any were accumulated
+      if (hasToolCalls && accumulatedCalls.size > 0) {
+        const calls: ToolCall[] = [...accumulatedCalls.entries()]
+          .sort(([a], [b]) => a - b)
+          .map(([_, tc]) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: (() => { try { return JSON.parse(tc.args); } catch { return {}; } })()
+          }))
+          .filter((tc) => tc.id && tc.name);
+        if (calls.length > 0) {
+          return { type: 'tool_calls', calls };
+        }
+      }
+
+      return { type: 'text', content: fullContent };
     } catch (error) {
-      if (options?.signal?.aborted) return '';
+      if (options?.signal?.aborted) return { type: 'text', content: '' };
       const message = error instanceof Error ? error.message : String(error);
-      return [
-        `Model request failed for provider ${this.config.provider}.`,
-        `model: ${this.runtime.model}`,
-        `base URL: ${this.config.baseURL}`,
-        `error: ${message}`
-      ].join('\n');
+      return {
+        type: 'text',
+        content: [
+          `Model request failed for provider ${this.config.provider}.`,
+          `model: ${this.runtime.model}`,
+          `base URL: ${this.config.baseURL}`,
+          `error: ${message}`
+        ].join('\n')
+      };
     }
   }
 }
@@ -155,16 +227,19 @@ export function toOpenAIMessages(messages: ChatMessage[]): ChatCompletionMessage
         tool_call_id: msg.tool_call_id ?? ''
       } as ChatCompletionMessageParam;
     }
-    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-      return {
-        role: 'assistant',
-        content: msg.content,
-        tool_calls: msg.tool_calls.map((tc) => ({
+    if (msg.role === 'assistant') {
+      const m: Record<string, unknown> = { role: 'assistant', content: msg.content };
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        m.tool_calls = msg.tool_calls.map((tc) => ({
           id: tc.id,
           type: 'function' as const,
           function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
-        }))
-      } as ChatCompletionMessageParam;
+        }));
+      }
+      if (msg.reasoning_content) {
+        m.reasoning_content = msg.reasoning_content;
+      }
+      return m as unknown as ChatCompletionMessageParam;
     }
     return { role: msg.role, content: msg.content ?? '' };
   });

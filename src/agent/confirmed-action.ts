@@ -4,6 +4,7 @@ import { applyPatchTool } from '../tools/patch.js';
 import { runShellCommand } from '../tools/shell.js';
 import { classifyShellCommand } from '../tools/shell.js';
 import { countTextLines, createCompactTextDiff } from '../tools/text-diff.js';
+import { style } from '../cli/style.js';
 
 type Confirmation = Extract<AgentTurnResult, { type: 'confirmation' }>;
 
@@ -71,6 +72,21 @@ export async function executeConfirmedTool(
   };
 }
 
+function fmtPath(p: string): string {
+  return style.cyan(p);
+}
+
+function fmtDiff(content: string): string {
+  return content.split('\n')
+    .map((line) => {
+      if (line.startsWith('+')) return style.green(line);
+      if (line.startsWith('-')) return style.red(line);
+      if (line.startsWith('@@')) return style.cyan(line);
+      return line;
+    })
+    .join('\n');
+}
+
 async function previewWriteFile(cwd: string, confirmation: Confirmation): Promise<string> {
   const path = String(confirmation.args.path ?? '');
   const content = typeof confirmation.args.content === 'string' ? confirmation.args.content : '';
@@ -79,12 +95,8 @@ async function previewWriteFile(cwd: string, confirmation: Confirmation): Promis
   const before = current.ok ? current.content : '';
 
   return [
-    'Tool: write_file',
-    `Target: ${path || '(missing path)'}`,
-    `Status: ${status}`,
-    `Lines: ${countTextLines(content)}`,
-    'Preview:',
-    createCompactTextDiff(before, content)
+    style.dim(`${style.label('┃')} ${fmtPath(path || '(missing path)')}  ${style.dim(`(${status}, ${countTextLines(content)} lines)`)}`),
+    fmtDiff(createCompactTextDiff(before, content))
   ].join('\n');
 }
 
@@ -92,13 +104,11 @@ function previewPatch(confirmation: Confirmation): string {
   const patch = typeof confirmation.args.patch === 'string' ? confirmation.args.patch : '';
   const files = affectedPatchFiles(patch);
   const previewLines = patch.split(/\r?\n/).slice(0, 40);
-  if (patch.split(/\r?\n/).length > 40) previewLines.push('... patch preview truncated');
+  if (patch.split(/\r?\n/).length > 40) previewLines.push(style.dim('... patch preview truncated'));
 
   return [
-    'Tool: apply_patch',
-    `Files: ${files.length ? files.join(', ') : 'unknown'}`,
-    'Preview:',
-    ...previewLines
+    style.dim(`${style.label('┃')} ${fmtPath(files.length ? files.join(', ') : 'unknown')}`),
+    ...previewLines.map((l) => fmtDiff(l))
   ].join('\n');
 }
 
@@ -116,11 +126,8 @@ async function previewReplaceInFile(cwd: string, confirmation: Confirmation): Pr
     : before;
 
   return [
-    'Tool: replace_in_file',
-    `Target: ${path || '(missing path)'}`,
-    `Replacements: ${replacements}`,
-    'Preview:',
-    createCompactTextDiff(before, after)
+    style.dim(`${style.label('┃')} ${fmtPath(path || '(missing path)')}  ${style.dim(`(${replacements} match${replacements !== 1 ? 'es' : ''})`)}`),
+    fmtDiff(createCompactTextDiff(before, after))
   ].join('\n');
 }
 
@@ -138,22 +145,16 @@ async function previewEditFile(cwd: string, confirmation: Confirmation): Promise
     afterLines.splice(startLine - 1, endLine - startLine + 1, ...replacement);
   }
   return [
-    'Tool: edit_file',
-    `Target: ${path || '(missing path)'}`,
-    `Lines: ${Number.isFinite(startLine) ? startLine : '?'}-${Number.isFinite(endLine) ? endLine : '?'}`,
-    'Preview:',
-    createCompactTextDiff(before, afterLines.join('\n'))
+    style.dim(`${style.label('┃')} ${fmtPath(path || '(missing path)')}  ${style.dim(`lines ${Number.isFinite(startLine) ? startLine : '?'}-${Number.isFinite(endLine) ? endLine : '?'}`)}`),
+    fmtDiff(createCompactTextDiff(before, afterLines.join('\n')))
   ].join('\n');
 }
+
 function previewShell(cwd: string, confirmation: Confirmation): string {
   const command = String(confirmation.args.command ?? '');
   const risk = classifyShellCommand(command);
-  return [
-    'Tool: run_shell',
-    `Cwd: ${cwd}`,
-    `Command: ${command}`,
-    `Risk: ${risk.risk === 'blocked' ? risk.reason ?? 'blocked' : 'requires confirmation'}`
-  ].join('\n');
+  const riskStyle = risk.risk === 'blocked' ? style.red : style.yellow;
+  return style.dim(`${style.label('┃')} ${command}  ${riskStyle(risk.risk === 'blocked' ? (risk.reason ?? 'blocked') : 'requires confirmation')}`);
 }
 
 function affectedPatchFiles(patch: string): string[] {

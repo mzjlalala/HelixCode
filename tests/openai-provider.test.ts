@@ -35,7 +35,7 @@ describe('OpenAIChatProvider', () => {
       { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' }
     ]);
 
-    expect(result).toEqual({ type: 'text', content: 'hello from model' });
+    expect(result).toEqual({ type: 'text', content: 'hello from model', reasoning_content: null });
     expect(calls).toEqual([
       {
         model: 'deepseek-reasoner',
@@ -44,7 +44,8 @@ describe('OpenAIChatProvider', () => {
           { role: 'user', content: 'Hi' },
           { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' }
         ],
-        temperature: 0.2
+        temperature: 0.2,
+        extra_body: { thinking: { type: 'enabled' } }
       }
     ]);
   });

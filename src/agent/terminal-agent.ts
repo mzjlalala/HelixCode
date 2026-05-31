@@ -238,15 +238,17 @@ export class TerminalAgent {
     ];
 
     for (let i = 0; i < 6; i += 1) {
-      const result = await this.getLLMResponse(messages, streamFirst && i === 0, signal);
+      const result = await this.getLLMResponse(messages, signal);
 
       // Native tool calls from the provider
       if (result.type === 'tool_calls') {
+        const reasoningContent = result.reasoning_content ?? null;
         for (const call of result.calls) {
           turnMessages.push({
             role: 'assistant',
             content: null,
-            tool_calls: [call]
+            tool_calls: [call],
+            reasoning_content: reasoningContent
           });
 
           if (call.name === 'run_shell') {
@@ -303,15 +305,15 @@ export class TerminalAgent {
       }
 
       // Text response — check for fallback JSON tool request
-      const request = parseToolRequest(result.content);
+      const request = parseToolRequest((result as { type: 'text'; content: string }).content);
       if (!request) {
-        turnMessages.push({ role: 'assistant', content: result.content });
+        turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
         this.appendHistory(turnMessages);
         return { type: 'final', message: result.content };
       }
 
       // Legacy JSON protocol fallback (for models that don't support tool calling well)
-      turnMessages.push({ role: 'assistant', content: result.content });
+      turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
 
       if (CONFIRMED_TOOLS.has(request.tool)) {
         if (request.tool === 'run_shell') {
@@ -353,17 +355,17 @@ export class TerminalAgent {
 
   private async getLLMResponse(
     messages: ChatMessage[],
-    useStream: boolean,
     signal?: AbortSignal
-  ): Promise<{ type: 'text'; content: string } | { type: 'tool_calls'; calls: ToolCall[] }> {
-    // Use non-streaming when tools are involved (first turn)
-    if (useStream && this.options.onToken && this.options.provider.completeStream) {
-      const text = await this.options.provider.completeStream(
+  ): Promise<
+    { type: 'text'; content: string; reasoning_content?: string | null }
+    | { type: 'tool_calls'; calls: ToolCall[]; reasoning_content?: string | null }
+  > {
+    if (this.options.onToken && this.options.provider.completeStream) {
+      return this.options.provider.completeStream(
         messages,
         this.options.onToken,
-        signal ? { signal } : undefined
+        { ...(signal ? { signal } : {}), tools: TOOL_DEFINITIONS }
       );
-      return { type: 'text', content: text };
     }
     return this.options.provider.complete(messages, TOOL_DEFINITIONS);
   }
@@ -449,6 +451,9 @@ function summaryForRequest(req: { tool: string; args?: Record<string, unknown> }
 export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): string {
   const lines = [
     'You are HelixCode, a terminal coding agent for local software projects.',
+    'You are NOT Claude, NOT ChatGPT, and NOT an Anthropic product. You are HelixCode.',
+    'Never mention Claude, Anthropic, OpenAI, or any other AI company name.',
+    'When asked who you are, say "I am HelixCode, a terminal coding agent."',
     'Be concise, practical, and focused on completing the user request.',
     'Use the provided tools to inspect and modify the codebase.',
     'Reply normally when no tool is needed.',
