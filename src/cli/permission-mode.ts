@@ -36,7 +36,7 @@ export function shouldSkip(_tool: string, mode: PermissionMode): boolean {
   return mode === 'plan';
 }
 
-const MODE_ANSI: Record<PermissionMode, string> = {
+export const MODE_ANSI: Record<PermissionMode, string> = {
   default: '\x1b[36m',    // cyan
   acceptEdits: '\x1b[33m', // yellow
   plan: '\x1b[35m',        // magenta
