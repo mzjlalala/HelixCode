@@ -4,11 +4,11 @@ import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
 import type { CompleterResult } from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
-import { writeSync } from 'node:fs';
+import { writeSync, readdirSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { resolve } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, savePermissionMode } from '../core/config.js';
 import { loadHistory, saveHistory } from '../core/history-store.js';
@@ -192,9 +192,50 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
   }
 
   const completer = (line: string): CompleterResult => {
-    if (!line.trimStart().startsWith('/')) return [[], line];
-    const candidates = completeSlashCommand(line);
-    return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
+    // Slash command completion
+    if (line.trimStart().startsWith('/')) {
+      const candidates = completeSlashCommand(line);
+      return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
+    }
+
+    // File path completion — sync readdir for reliability
+    const words = line.split(/\s+/);
+    const lastWord = words[words.length - 1] ?? '';
+    if (!lastWord || /^[/\\]/.test(lastWord) || lastWord.startsWith('~')) return [[], line];
+
+    try {
+      let searchDir: string;
+      let prefix: string;
+      let parent: string;
+
+      if (lastWord.endsWith('/') || lastWord.endsWith('\\')) {
+        // "src/" → list contents of src/
+        parent = lastWord.replace(/[/\\]$/, '');
+        searchDir = resolve(config.cwd, parent);
+        prefix = '';
+      } else {
+        parent = dirname(lastWord).replace(/\\/g, '/');
+        searchDir = parent === '.' ? config.cwd : resolve(config.cwd, parent);
+        prefix = basename(lastWord);
+      }
+
+      const entries = readdirSync(searchDir, { withFileTypes: true });
+      const prefixLower = prefix.toLowerCase();
+      const matches = entries
+        .filter((e) => {
+          if (e.name.startsWith('.')) return false;
+          return prefixLower === '' || e.name.toLowerCase().startsWith(prefixLower);
+        })
+        .map((e) => {
+          const name = e.isDirectory() ? `${e.name}/` : e.name;
+          return parent && parent !== '.' ? `${parent.replace(/\\/g, '/')}/${name}` : name;
+        })
+        .sort();
+
+      return [matches.length ? matches : [lastWord], lastWord];
+    } catch {
+      return [[], line];
+    }
   };
 
   // Prep listener BEFORE createInterface so our handler fires before readline's
