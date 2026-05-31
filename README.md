@@ -47,9 +47,22 @@ helix
 
 ## Configuration
 
-HelixCode reads configuration from environment variables. Copy `.env.example` to `.env` or set them directly.
+HelixCode reads configuration from multiple sources (priority: CLI flag > env var > config file > default).
 
-### OpenAI
+### 1. Environment variables
+
+Copy `.env.example` to `.env` or set them directly.
+
+| Variable | Description | Required |
+|----------|-------------|:--------:|
+| `HELIX_API_KEY` | Universal API key | At least one |
+| `OPENAI_API_KEY` | OpenAI-specific key | |
+| `DEEPSEEK_API_KEY` | DeepSeek-specific key | |
+| `HELIX_PROVIDER` | Provider: `openai`, `deepseek`, or `custom` | |
+| `HELIX_CHAT_MODEL` | Model override (default: `gpt-4o` / `deepseek-chat`) | |
+| `HELIX_BASE_URL` | API base URL override | |
+
+#### OpenAI
 
 ```bash
 export HELIX_PROVIDER=openai
@@ -57,7 +70,7 @@ export OPENAI_API_KEY=sk-your-openai-key
 export HELIX_CHAT_MODEL=gpt-4o
 ```
 
-### DeepSeek (with thinking/reasoning)
+#### DeepSeek (with thinking/reasoning)
 
 ```bash
 export HELIX_PROVIDER=deepseek
@@ -67,7 +80,7 @@ export HELIX_CHAT_MODEL=deepseek-chat
 
 DeepSeek thinking mode is automatically enabled. `reasoning_content` is captured and returned in subsequent requests as required by the API.
 
-### Custom OpenAI-compatible endpoint
+#### Custom OpenAI-compatible endpoint
 
 ```bash
 export HELIX_PROVIDER=custom
@@ -76,16 +89,32 @@ export HELIX_BASE_URL=https://your-provider.example/v1
 export HELIX_CHAT_MODEL=your-model
 ```
 
-### Environment variables reference
+### 2. Config file (`.helix/config.json`)
 
-| Variable | Description |
-|----------|-------------|
-| `HELIX_PROVIDER` | Provider: `openai`, `deepseek`, or `custom` |
-| `HELIX_API_KEY` | Universal API key (fallback) |
-| `OPENAI_API_KEY` | OpenAI-specific key |
-| `DEEPSEEK_API_KEY` | DeepSeek-specific key |
-| `HELIX_CHAT_MODEL` | Model override (default: `gpt-4o` / `deepseek-chat`) |
-| `HELIX_BASE_URL` | API base URL override |
+Create `.helix/config.json` in your project root to persist settings:
+
+```json
+{
+  "model": "gpt-4o",
+  "permissionMode": "auto",
+  "instructions": ["CUSTOM.md"]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `model` | Default model (overridden by env var `HELIX_CHAT_MODEL` or `--model`) |
+| `permissionMode` | Permission mode: `default`, `acceptEdits`, `plan`, or `auto` |
+| `instructions` | Additional project instruction file paths |
+
+The permission mode is **automatically saved** when you change it with Shift+Tab or `/mode`.
+
+### 3. CLI flags
+
+```bash
+helix --model gpt-4o-mini    # Override model for this session
+helix --mode edit              # Start in acceptEdits mode
+```
 
 ---
 
@@ -114,6 +143,7 @@ helix --yes --max-turns 10 "fix the failing tests"
 | `-y, --yes` | Auto-confirm actions in one-shot mode |
 | `--max-turns <N>` | Max auto-confirm turns (default: 10) |
 | `--model <name>` | Override chat model |
+| `--mode <name>` | Permission mode: `default`, `edit`, `plan`, `auto` |
 
 ### Slash commands
 
@@ -124,7 +154,11 @@ helix --yes --max-turns 10 "fix the failing tests"
 | `/doctor` | Show full diagnostics |
 | `/model` | Show current model |
 | `/model <name>` | Switch model at runtime |
+| `/mode` | Cycle permission mode (default/edit/plan/auto) |
+| `/undo` | Undo the last file modification |
 | `/history` | Show history message count |
+| `/history search <keyword>` | Search conversation history |
+| `/history save` | Manually save history to disk |
 | `/plan` | Show session plan |
 | `/compact` | Compact session history |
 | `/compact N` | Compact to N messages |
@@ -149,6 +183,8 @@ HelixCode uses **native OpenAI tool calling** (`tools` parameter + `tool_calls` 
 | `git_status` | ✅ | Git working tree status |
 | `git_diff` | ✅ | Git diff (unstaged) |
 | `update_plan` | ✅ | Track multi-step plan |
+| `web_search` | ✅ | Search the web via Bing |
+| `web_fetch` | ✅ | Fetch and extract text from a URL |
 | `write_file` | — | Write file (confirmed) |
 | `replace_in_file` | — | Replace exact text (confirmed) |
 | `edit_file` | — | Replace line range (confirmed) |
@@ -168,10 +204,15 @@ Place `AGENTS.md` or `.helix/instructions.md` at the project root to inject cust
 - **Streaming output** — tokens appear in real-time as the model generates them
 - **Native tool calling** — uses OpenAI-compatible `tools`/`tool_calls` protocol
 - **DeepSeek reasoning** — automatic thinking mode with `reasoning_content` preservation
-- **Styled terminal UI** — colored output, symbols, confirmation previews with diffs
-- **Confirmation flow** — safe tools auto-execute, risky tools show a preview before proceeding
-- **Ctrl+C cancellation** — interrupt an in-progress LLM call without exiting the REPL
-- **Runtime model switching** — change the model mid-session with `/model <name>`
+- **Web search & fetch** — search the web via Bing (`web_search`) and fetch URLs (`web_fetch`), no API key required for either
+- **Permission modes** — cycle via Shift+Tab: `default` (ask each), `edit` (auto file edits), `plan` (read-only), `auto` (all auto). Persisted to config file
+- **Session persistence** — conversation history auto-saves to `.helix/history.json` and restores on next launch
+- **Undo** — `/undo` reverts the last file modification (write, edit, replace, patch)
+- **History search** — `/history search <keyword>` finds past messages
+- **Styled terminal UI** — colored output, mode-aware prompt, inline diffs
+- **Confirmation flow** — safe tools auto-execute, risky tools show a diff preview
+- **Ctrl+C cancellation** — interrupt LLM calls or running tools mid-execution
+- **Runtime model switching** — change model mid-session with `/model <name>`
 
 ---
 
@@ -180,7 +221,7 @@ Place `AGENTS.md` or `.helix/instructions.md` at the project root to inject cust
 ```bash
 npm install                 # Install dependencies
 npm run dev -- --cwd .      # Start REPL from source
-npm test                    # Run tests (61 tests)
+npm test                    # Run tests (90 tests)
 npm run typecheck           # Full type check
 npm run build               # Build dist/ via tsup
 ```
