@@ -20,9 +20,23 @@ import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.j
 import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
 
-// On Windows, set console to UTF-8 for Unicode characters (spinner, logo, symbols)
+// Windows console output helper.
+// On Windows TTY: use process.stdout.write() → WriteConsoleW (direct UTF-16, no codepage issues).
+// Other platforms / non-TTY: use writeSync(1, ...) for reliable raw-bytes flushing.
+const writeOutput = process.platform === 'win32' && process.stdout.isTTY
+  ? (text: string) => { process.stdout.write(text); }
+  : (text: string) => writeSync(1, text);
+
+// On Windows, force UTF-8 console code page for Unicode display.
+// Some terminals (Windows Terminal, ConEmu) may not inherit the code page
+// from the parent process, so we set it at startup.
 if (process.platform === 'win32') {
-  try { execSync('chcp.com 65001 > nul', { windowsHide: true }); } catch { /* best-effort */ }
+  try {
+    execSync('chcp.com 65001 > nul', { windowsHide: true, timeout: 3000 });
+    // Also set stream encoding to ensure Node.js pipes use UTF-8
+    process.stdout.setDefaultEncoding('utf-8');
+    process.stderr.setDefaultEncoding('utf-8');
+  } catch { /* best-effort — terminal may already be UTF-8 */ }
 }
 
 const INV_BG = '\x1b[48;5;236m\x1b[38;5;255m';
@@ -510,18 +524,18 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     onToken: (token) => {
       stopTimerAndFreeze();
       streamedThisTurn = true;
-      if (lastOutput === 'reasoning') writeSync(1, '\n');
+      if (lastOutput === 'reasoning') writeOutput('\n');
       lastOutput = 'content';
       // Write in small synchronous bursts so Windows console renders progressively
       for (let i = 0; i < token.length; i += 4) {
-        writeSync(1, token.slice(i, i + 4));
+        writeOutput(token.slice(i, i + 4));
       }
     },
     onReasoning: (text) => {
       stopTimerAndFreeze();
-      if (lastOutput === 'content') writeSync(1, '\n');
+      if (lastOutput === 'content') writeOutput('\n');
       lastOutput = 'reasoning';
-      writeSync(1, `\x1b[2m\x1b[3m${text}\x1b[0m`);
+      writeOutput(`\x1b[2m\x1b[3m${text}\x1b[0m`);
     }
   });
   return { config, projectInstructions, runtime, agent };
