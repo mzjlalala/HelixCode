@@ -203,7 +203,7 @@ export class OpenAIChatProvider implements ChatProvider {
           }))
           .filter((tc) => tc.id && tc.name);
         if (calls.length > 0) {
-          return { type: 'tool_calls', calls };
+          return { type: 'tool_calls', calls, content: fullContent || null };
         }
       }
 

@@ -165,6 +165,7 @@ const CONFIRMED_TOOLS = new Set(TOOL_DEFINITIONS.filter((t) => t.confirm).map((t
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
   private readonly plan: PlanItem[] = [];
+  private turnCount = 0;
 
   constructor(private readonly options: {
     cwd: string;
@@ -232,6 +233,8 @@ export class TerminalAgent {
   }
 
   private async completeTurn(turnMessages: ChatMessage[], streamFirst = false, signal?: AbortSignal): Promise<AgentTurnResult> {
+    this.turnCount += 1;
+    const isFirstTurn = this.turnCount === 1;
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
       ...this.history,
@@ -239,7 +242,12 @@ export class TerminalAgent {
     ];
 
     for (let i = 0; i < 6; i += 1) {
-      const result = await this.getLLMResponse(messages, signal);
+      const result = await this.getLLMResponse(messages, isFirstTurn, signal);
+
+      // Display reasoning if available (non-streaming path)
+      if (result.reasoning_content && this.options.onReasoning) {
+        this.options.onReasoning(result.reasoning_content);
+      }
 
       // Native tool calls from the provider
       if (result.type === 'tool_calls') {
@@ -247,7 +255,7 @@ export class TerminalAgent {
         for (const call of result.calls) {
           turnMessages.push({
             role: 'assistant',
-            content: null,
+            content: result.content ?? null,
             tool_calls: [call],
             reasoning_content: reasoningContent
           });
@@ -280,7 +288,7 @@ export class TerminalAgent {
               type: 'confirmation',
               tool: call.name,
               args: call.arguments,
-              summary: summaryForTool(call),
+              summary: toolSummary(call.name, call.arguments),
               tool_call_id: call.id
             };
           }
@@ -334,7 +342,7 @@ export class TerminalAgent {
           type: 'confirmation',
           tool: request.tool,
           args: request.args ?? {},
-          summary: summaryForRequest(request),
+          summary: toolSummary(request.tool, request.args ?? {}),
           tool_call_id: ''
         };
       }
@@ -356,22 +364,16 @@ export class TerminalAgent {
 
   private async getLLMResponse(
     messages: ChatMessage[],
+    isFirstTurn: boolean,
     signal?: AbortSignal
   ): Promise<
     { type: 'text'; content: string; reasoning_content?: string | null }
-    | { type: 'tool_calls'; calls: ToolCall[]; reasoning_content?: string | null }
+    | { type: 'tool_calls'; calls: ToolCall[]; content?: string | null; reasoning_content?: string | null }
   > {
-    if (this.options.onToken && this.options.provider.completeStream) {
-      const streamOptions: Record<string, unknown> = { tools: TOOL_DEFINITIONS };
-      if (signal) streamOptions.signal = signal;
-      if (this.options.onReasoning) streamOptions.onReasoning = this.options.onReasoning;
-      return this.options.provider.completeStream(
-        messages,
-        this.options.onToken,
-        streamOptions as { signal?: AbortSignal; tools?: ToolDefinition[]; onReasoning?: (text: string) => void }
-      );
+    if (isFirstTurn || !this.options.onToken || !this.options.provider.completeStream) {
+      return this.options.provider.complete(messages, TOOL_DEFINITIONS);
     }
-    return this.options.provider.complete(messages, TOOL_DEFINITIONS);
+    return this.options.provider.completeStream(messages, this.options.onToken, { tools: TOOL_DEFINITIONS });
   }
 
   private async executeTool(call: ToolCall): Promise<string> {
@@ -428,27 +430,14 @@ export class TerminalAgent {
   }
 }
 
-function summaryForTool(call: ToolCall): string {
-  const a = call.arguments;
-  switch (call.name) {
-    case 'write_file': return `Write file: ${String(a.path ?? '')}`;
-    case 'replace_in_file': return `Replace text in file: ${String(a.path ?? '')}`;
-    case 'edit_file': return `Edit file: ${String(a.path ?? '')} lines ${String(a.startLine ?? '')}-${String(a.endLine ?? '')}`;
+function toolSummary(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case 'write_file': return `Write file: ${String(args.path ?? '')}`;
+    case 'replace_in_file': return `Replace text in file: ${String(args.path ?? '')}`;
+    case 'edit_file': return `Edit file: ${String(args.path ?? '')} lines ${String(args.startLine ?? '')}-${String(args.endLine ?? '')}`;
     case 'apply_patch': return 'Apply patch to project files';
-    case 'run_shell': return `Run shell command: ${String(a.command ?? '')}`;
-    default: return `Execute ${call.name}`;
-  }
-}
-
-function summaryForRequest(req: { tool: string; args?: Record<string, unknown> }): string {
-  const a = req.args ?? {};
-  switch (req.tool) {
-    case 'write_file': return `Write file: ${String(a.path ?? '')}`;
-    case 'replace_in_file': return `Replace text in file: ${String(a.path ?? '')}`;
-    case 'edit_file': return `Edit file: ${String(a.path ?? '')} lines ${String(a.startLine ?? '')}-${String(a.endLine ?? '')}`;
-    case 'apply_patch': return 'Apply patch to project files';
-    case 'run_shell': return `Run shell command: ${String(a.command ?? '')}`;
-    default: return `Execute ${req.tool}`;
+    case 'run_shell': return `Run shell command: ${String(args.command ?? '')}`;
+    default: return `Execute ${name}`;
   }
 }
 
@@ -459,6 +448,8 @@ export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): st
     'Never mention Claude, Anthropic, OpenAI, or any other AI company name.',
     'When asked who you are, say "I am HelixCode, a terminal coding agent."',
     'Be concise, practical, and focused on completing the user request.',
+    'Do NOT use Markdown formatting (**, ##, |table|, ---, `code`) in your responses.',
+    'Output plain text suitable for terminal display. Use simple indentation for structure.',
     'Use the provided tools to inspect and modify the codebase.',
     'Reply normally when no tool is needed.',
     'Before editing, inspect the relevant files with read_file or search_files.',

@@ -14,7 +14,7 @@ export interface ChatMessage {
 
 export type ChatResult =
   | { type: 'text'; content: string; reasoning_content?: string | null }
-  | { type: 'tool_calls'; calls: ToolCall[]; reasoning_content?: string | null };
+  | { type: 'tool_calls'; calls: ToolCall[]; content?: string | null; reasoning_content?: string | null };
 
 export interface ToolDefinition {
   name: string;

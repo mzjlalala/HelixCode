@@ -57,10 +57,25 @@ program
     await runRepl(options.cwd, options.model);
   });
 
-// Module-level state
 let currentAbort: AbortController | null = null;
 let streamedThisTurn = false;
-let hadReasoning = false;
+let lastOutput: 'reasoning' | 'content' | null = null;
+
+// Strip Markdown formatting for non-streamed output
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^-\s+/gm, '• ')
+    .replace(/^\|[\s:-]+\|[\s:-]+\|$/gm, '')
+    .replace(/^\|(.+)\|$/gm, (_, s) => s.split('|').map((c: string) => c.trim()).join('  '))
+    .replace(/^---+$/gm, '')
+    .replace(/^>\s+/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+/, '');
+}
+
 
 export async function runOnce(
   cwd: string,
@@ -179,7 +194,7 @@ async function handleInputLine(
   const abort = new AbortController();
   currentAbort = abort;
   streamedThisTurn = false;
-  hadReasoning = false;
+  lastOutput = null;
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
     if (result.type === 'final' && abort.signal.aborted) {
@@ -203,18 +218,21 @@ async function handleAgentResult(
   }
 ): Promise<void> {
   if (result.type === 'final') {
+    const message = !streamedThisTurn ? stripMarkdown(result.message) : '';
     if (!streamedThisTurn) {
-      output.write(`${style.bold('  HelixCode')}\n${result.message}\n`);
+      const prefix = lastOutput ? '\n' : '';
+      output.write(`${prefix}${style.bold('  HelixCode')}\n${message}\n`);
     } else {
       output.write('\n');
     }
     streamedThisTurn = false;
+    lastOutput = null;
     return;
   }
 
-  // If text was streamed before the tool call, ensure a clean line before the preview
-  if (streamedThisTurn) output.write('\n');
+  if (streamedThisTurn || lastOutput) output.write('\n');
   streamedThisTurn = false;
+  lastOutput = null;
 
   output.write(`${style.label('┈')} ${style.bold(result.tool.replace(/_/g, ' '))}  ${style.dim(result.summary)}\n`);
   const preview = await previewConfirmedTool(context.config.cwd, result);
@@ -284,15 +302,13 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     projectInstructions,
     onToken: (token) => {
       streamedThisTurn = true;
-      if (hadReasoning) {
-        hadReasoning = false;
-        output.write('\n');
-      }
+      if (lastOutput === 'reasoning') output.write('\n');
+      lastOutput = 'content';
       output.write(token);
     },
     onReasoning: (text) => {
-      streamedThisTurn = true;
-      hadReasoning = true;
+      if (lastOutput === 'content') output.write('\n');
+      lastOutput = 'reasoning';
       output.write(`\x1b[2m\x1b[3m${text}\x1b[0m`);
     }
   });
