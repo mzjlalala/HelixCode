@@ -258,15 +258,18 @@ export class TerminalAgent {
     const keep = Math.max(0, Math.floor(keepMessages));
     if (this.history.length > keep) {
       this.history.splice(0, this.history.length - keep);
+      // Remove orphaned tool messages at the start (their parent tool_calls was stripped)
+      while (this.history.length > 0 && this.history[0]?.role === 'tool') {
+        this.history.shift();
+      }
     }
     return this.history.length;
   }
 
-  /** Load persisted history messages (user/assistant pairs) into agent history */
+  /** Load persisted history messages into agent history */
   loadHistory(messages: ChatMessage[]): void {
-    const filtered = messages.filter(
-      (m) => m.role === 'user' || m.role === 'assistant'
-    );
+    // Keep all messages except system (we generate system prompt fresh each turn)
+    const filtered = messages.filter((m) => m.role !== 'system');
     if (filtered.length > 0) {
       this.history.push(...filtered);
     }
@@ -341,7 +344,11 @@ export class TerminalAgent {
           }
 
           // Safe tool — execute inline
-          const observation = await this.executeTool(call);
+          if (signal?.aborted) {
+            this.appendHistory(turnMessages);
+            return { type: 'final', message: 'Interrupted.', timeline: this.timeline.snapshot() };
+          }
+          const observation = await this.executeTool(call, signal);
           turnMessages.push({
             role: 'tool',
             content: observation,
@@ -395,7 +402,11 @@ export class TerminalAgent {
         };
       }
 
-      const observation = await this.executeTool({ id: '', name: request.tool, arguments: request.args ?? {} });
+      if (signal?.aborted) {
+        this.appendHistory(turnMessages);
+        return { type: 'final', message: 'Interrupted.', timeline: this.timeline.snapshot() };
+      }
+      const observation = await this.executeTool({ id: '', name: request.tool, arguments: request.args ?? {} }, signal);
       turnMessages.push({ role: 'tool', content: observation, tool_call_id: '' });
       messages.splice(
         0,
@@ -427,7 +438,9 @@ export class TerminalAgent {
     return this.options.provider.complete(messages, TOOL_DEFINITIONS);
   }
 
-  private async executeTool(call: ToolCall): Promise<string> {
+  private async executeTool(call: ToolCall, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) return JSON.stringify({ ok: false, error: 'Interrupted.' });
+
     const start = performance.now();
     try {
       const args = call.arguments;
@@ -435,22 +448,22 @@ export class TerminalAgent {
       if (call.name === 'read_file') {
         return JSON.stringify(await readFileTool(this.options.cwd, {
           path: args.path, startLine: args.startLine, endLine: args.endLine
-        }));
+        }, signal));
       }
       if (call.name === 'search_files') {
         return JSON.stringify(await searchFilesTool(this.options.cwd, {
           query: args.query, glob: args.glob, caseSensitive: args.caseSensitive,
           maxResults: args.maxResults, contextLines: args.contextLines
-        }));
+        }, signal));
       }
       if (call.name === 'list_files') {
-        return JSON.stringify(await listFilesTool(this.options.cwd));
+        return JSON.stringify(await listFilesTool(this.options.cwd, signal));
       }
       if (call.name === 'git_status') {
-        return await gitStatusTool(this.options.cwd);
+        return await gitStatusTool(this.options.cwd, signal);
       }
       if (call.name === 'git_diff') {
-        return await gitDiffTool(this.options.cwd);
+        return await gitDiffTool(this.options.cwd, signal);
       }
       if (call.name === 'update_plan') {
         return JSON.stringify(this.updatePlan(args));

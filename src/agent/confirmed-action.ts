@@ -4,6 +4,7 @@ import { applyPatchTool } from '../tools/patch.js';
 import { runShellCommand } from '../tools/shell.js';
 import { classifyShellCommand } from '../tools/shell.js';
 import { countTextLines, createCompactTextDiff } from '../tools/text-diff.js';
+import { backupFile, affectedPatchFiles } from '../tools/undo.js';
 import { style } from '../cli/style.js';
 
 type Confirmation = Extract<AgentTurnResult, { type: 'confirmation' }>;
@@ -23,20 +24,33 @@ export async function previewConfirmedTool(cwd: string, confirmation: Confirmati
 
 const executeHandlers: Record<string, (cwd: string, c: Confirmation) => Promise<ConfirmedToolResult>> = {
   write_file: async (cwd, c) => {
-    const result = await writeFileTool(cwd, { path: c.args.path, content: c.args.content });
+    const path = String(c.args.path ?? '');
+    await backupFile(cwd, path, 'write_file');
+    const result = await writeFileTool(cwd, { path, content: c.args.content });
     if (!result.ok) return result;
     return { ok: true, output: `Wrote ${result.path}` };
   },
-  apply_patch: async (cwd, c) => applyPatchTool(cwd, { patch: c.args.patch }),
+  apply_patch: async (cwd, c) => {
+    const patch = String(c.args.patch ?? '');
+    // Back up all affected files before applying
+    for (const f of affectedPatchFiles(patch)) {
+      await backupFile(cwd, f, 'apply_patch');
+    }
+    return applyPatchTool(cwd, { patch });
+  },
   replace_in_file: async (cwd, c) => {
+    const path = String(c.args.path ?? '');
+    await backupFile(cwd, path, 'replace_in_file');
     const result = await replaceInFileTool(cwd, {
-      path: c.args.path, oldText: c.args.oldText, newText: c.args.newText, replaceAll: c.args.replaceAll
+      path, oldText: c.args.oldText, newText: c.args.newText, replaceAll: c.args.replaceAll
     });
     if (!result.ok) return result;
     return { ok: true, output: `Replaced ${result.replacements} match(es) in ${result.path}` };
   },
   edit_file: async (cwd, c) => {
-    const result = await editFileTool(cwd, { path: c.args.path, startLine: c.args.startLine, endLine: c.args.endLine, content: c.args.content });
+    const path = String(c.args.path ?? '');
+    await backupFile(cwd, path, 'edit_file');
+    const result = await editFileTool(cwd, { path, startLine: c.args.startLine, endLine: c.args.endLine, content: c.args.content });
     if (!result.ok) return result;
     return { ok: true, output: `Edited ${result.path} lines ${String(c.args.startLine)}-${String(c.args.endLine)}` };
   },
@@ -136,16 +150,4 @@ function previewShell(cwd: string, confirmation: Confirmation): string {
   const risk = classifyShellCommand(command);
   const riskStyle = risk.risk === 'blocked' ? style.red : style.yellow;
   return style.dim(`${style.label('┃')} ${command}  ${riskStyle(risk.risk === 'blocked' ? (risk.reason ?? 'blocked') : 'requires confirmation')}`);
-}
-
-function affectedPatchFiles(patch: string): string[] {
-  const files = new Set<string>();
-  for (const line of patch.split(/\r?\n/)) {
-    if (!line.startsWith('diff --git ')) continue;
-    const parts = line.slice('diff --git '.length).split(/\s+/).filter(Boolean);
-    const candidate = parts[1] ?? parts[0];
-    if (!candidate) continue;
-    files.add(candidate.replace(/^"|"$/g, '').replace(/^[ab]\//, ''));
-  }
-  return [...files];
 }

@@ -189,6 +189,12 @@ describe('slash commands', () => {  it('completes slash commands by prefix with 
       expect(result.output).toContain('No history matches');
     }
   });
+
+  it('/undo returns undo flag', () => {
+    const result = handleSlashCommand('/undo', { cwd: '/tmp' });
+    expect(result.handled).toBe(true);
+    if (result.handled) expect(result.undo).toBe(true);
+  });
 });
 
 describe('one-shot prompt helpers', () => {

@@ -254,7 +254,7 @@ describe('TerminalAgent', () => {  it('guides the model through a coding-agent t
     expect(agent.historySize()).toBe(2);
   });
 
-  it('loadHistory filters out system and tool messages', () => {
+  it('loadHistory filters out system messages only', () => {
     const provider = new ScriptedProvider([]);
     const agent = new TerminalAgent({ cwd: '/test', provider });
 
@@ -264,7 +264,8 @@ describe('TerminalAgent', () => {  it('guides the model through a coding-agent t
       { role: 'assistant', content: 'Hi', tool_calls: [] },
       { role: 'tool', content: 'result', tool_call_id: '1' },
     ]);
-    expect(agent.historySize()).toBe(2); // only user + assistant
+    // system is filtered, but user/assistant/tool are kept (tool chain integrity)
+    expect(agent.historySize()).toBe(3);
   });
 
   it('getHistory returns a copy of history', () => {

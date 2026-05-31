@@ -32,8 +32,10 @@ function resolveInsideProject(cwd: string, inputPath: string): FileToolResult {
 
 export async function readFileTool(
   cwd: string,
-  args: { path?: unknown; startLine?: unknown; endLine?: unknown }
+  args: { path?: unknown; startLine?: unknown; endLine?: unknown },
+  signal?: AbortSignal
 ): Promise<FileToolResult> {
+  if (signal?.aborted) return { ok: false, error: 'Interrupted.' };
   if (typeof args.path !== 'string' || !args.path.trim()) {
     return { ok: false, error: 'read_file requires a string path.' };
   }
@@ -149,15 +151,17 @@ export async function editFileTool(
   if (!written.ok) return written;
   return { ok: true, path: args.path, linesChanged: endLine - startLine + 1 };
 }
-async function walk(cwd: string, dir = '.'): Promise<string[]> {
+async function walk(cwd: string, dir = '.', signal?: AbortSignal): Promise<string[]> {
+  if (signal?.aborted) return [];
   const entries = await readdir(resolve(cwd, dir), { withFileTypes: true });
   const files: string[] = [];
 
   for (const entry of entries) {
+    if (signal?.aborted) break;
     const child = dir === '.' ? entry.name : `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
       if (['.git', 'node_modules', 'dist', 'coverage', '.helix'].includes(entry.name)) continue;
-      files.push(...await walk(cwd, child));
+      files.push(...await walk(cwd, child, signal));
     } else if (entry.isFile()) {
       files.push(child);
     }
@@ -166,9 +170,9 @@ async function walk(cwd: string, dir = '.'): Promise<string[]> {
   return files;
 }
 
-export async function listFilesTool(cwd: string): Promise<{ ok: true; files: string[] } | { ok: false; error: string }> {
+export async function listFilesTool(cwd: string, signal?: AbortSignal): Promise<{ ok: true; files: string[] } | { ok: false; error: string }> {
   try {
-    return { ok: true, files: (await walk(cwd)).sort() };
+    return { ok: true, files: (await walk(cwd, '.', signal)).sort() };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -182,13 +186,15 @@ export async function searchFilesTool(
     caseSensitive?: unknown;
     maxResults?: unknown;
     contextLines?: unknown;
-  }
+  },
+  signal?: AbortSignal
 ): Promise<SearchToolResult> {
+  if (signal?.aborted) return { ok: true, matches: [] };
   if (typeof args.query !== 'string' || !args.query.trim()) {
     return { ok: false, error: 'search_files requires a string query.' };
   }
 
-  const listed = await listFilesTool(cwd);
+  const listed = await listFilesTool(cwd, signal);
   if (!listed.ok) return listed;
 
   const matches: SearchMatch[] = [];
@@ -198,8 +204,9 @@ export async function searchFilesTool(
   const needle = caseSensitive ? args.query : args.query.toLowerCase();
 
   for (const path of listed.files) {
+    if (signal?.aborted) return { ok: true, matches };
     if (typeof args.glob === 'string' && args.glob.trim() && !matchesGlob(path, args.glob)) continue;
-    const file = await readFileTool(cwd, { path });
+    const file = await readFileTool(cwd, { path }, signal);
     if (!file.ok) continue;
     const lines = file.content.split(/\r?\n/);
     for (let index = 0; index < lines.length; index += 1) {

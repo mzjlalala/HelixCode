@@ -19,6 +19,7 @@ import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-a
 import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.js';
 import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
+import { undoLast } from '../tools/undo.js';
 
 // Windows console output helper.
 // On Windows TTY: use process.stdout.write() → WriteConsoleW (direct UTF-16, no codepage issues).
@@ -204,14 +205,7 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
     if (key && key.name === 'tab' && key.shift && !closing) {
       currentMode = cycleMode(currentMode);
       modeCyclePending = true;
-      // Persist mode to config file
       savePermissionMode(config.cwd, currentMode).catch(() => {});
-
-      // Redraw prompt immediately with new mode tag (no newline)
-      if (rl) {
-        rl.setPrompt(`${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} > `);
-        rl.prompt(true); // preserve cursor position
-      }
     }
   });
 
@@ -238,18 +232,8 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
         modeCyclePending = false;
         output.write(`${RESET}\n${style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`)}\n`);
       }
-      // Use setPrompt + prompt() + raw question('') so _prompt contains the full tag.
-      // question('') writes nothing extra but properly captures the line input.
-      rl.setPrompt(`${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} > `);
-      rl.prompt();
-      line = (await new Promise<string>((resolve) => {
-        const handler = () => resolve('');
-        rl.on('close', handler);
-        rl.question('').then((l) => {
-          rl.off('close', handler);
-          resolve(l);
-        });
-      })).trim();
+      output.write(`\n${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} `);
+      line = (await rl.question('> ')).trim();
     } catch {
       if (!closing) output.write(`\n${style.dim('Goodbye.')}\n`);
       break;
@@ -301,6 +285,15 @@ async function handleInputLine(
     output.write(`${slash.output}\n`);
     if (slash.historySave) {
       saveHistory(context.config.cwd, context.agent.getHistory()).catch(() => {});
+    }
+    if (slash.undo) {
+      undoLast(context.config.cwd).then((result) => {
+        if (result.ok) {
+          output.write(`${style.success(`${SYMBOL.success} Undid ${result.entry.tool}: restored ${result.entry.path}`)}\n`);
+        } else {
+          output.write(`${style.dim(`Cannot undo: ${result.error}`)}\n`);
+        }
+      }).catch(() => {});
     }
     if (slash.clear || slash.reset) {
       context.agent.clearHistory();

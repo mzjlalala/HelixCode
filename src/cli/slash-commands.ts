@@ -13,6 +13,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: '/doctor', description: 'Show local HelixCode diagnostics' },
   { name: '/model', description: 'Show or switch the current chat model', usage: '/model <name>' },
   { name: '/mode', description: 'Cycle permission mode (default/edit/plan/auto)' },
+  { name: '/undo', description: 'Undo the last file modification' },
   { name: '/history', description: 'Show history size, search, or save', usage: '/history [search <keyword>|save]' },
   { name: '/plan', description: 'Show current session plan' },
   { name: '/compact', description: 'Compact session history', usage: '/compact [keep]' },
@@ -57,6 +58,7 @@ export type SlashCommandResult =
       model?: string;
       cycleMode?: true;
       historySave?: true;
+      undo?: true;
     }
   | { handled: false };
 
@@ -259,6 +261,14 @@ export function handleSlashCommand(
       exit: false,
       clear: false,
       cycleMode: true,
+      output: ''
+    };
+  }
+
+  if (command === '/undo') {
+    return {
+      handled: true, exit: false, clear: false,
+      undo: true,
       output: ''
     };
   }
