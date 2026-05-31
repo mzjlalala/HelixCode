@@ -205,7 +205,7 @@ export class TerminalAgent {
 
   async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
     this.timeline.reset();
-    return this.completeTurn([{ role: 'user', content: input }], true, options?.signal);
+    return this.completeTurn([{ role: 'user', content: input }], options?.signal);
   }
 
   async continueAfterConfirmation(
@@ -261,31 +261,22 @@ export class TerminalAgent {
     return this.plan.map((item) => ({ ...item }));
   }
 
-  private async completeTurn(turnMessages: ChatMessage[], streamFirst = false, signal?: AbortSignal): Promise<AgentTurnResult> {
+  private async completeTurn(turnMessages: ChatMessage[], signal?: AbortSignal): Promise<AgentTurnResult> {
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
       ...this.history,
       ...turnMessages
     ];
 
-    let isFirstTurn = streamFirst;
-
     for (let i = 0; i < 6; i += 1) {
       const llmStart = performance.now();
-      const result = await this.getLLMResponse(messages, isFirstTurn, signal);
-      isFirstTurn = false;
+      const result = await this.getLLMResponse(messages, signal);
 
-      // Record LLM timing right after response (before reasoning display,
-      // which includes artificial setTimeout(0) delays)
       this.timeline.record('llm', performance.now() - llmStart);
 
-      // Display reasoning if available (non-streaming path) — stream it word-by-word
-      if (result.reasoning_content && this.options.onReasoning) {
-        const words = result.reasoning_content.split(/(?<=\s)/);
-        for (const word of words) {
-          this.options.onReasoning(word);
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
+      // Non-streaming path: emit reasoning at once (streaming path emits via SSE onReasoning)
+      if (!this.options.onToken && result.reasoning_content && this.options.onReasoning) {
+        this.options.onReasoning(result.reasoning_content);
       }
 
       // Native tool calls from the provider
@@ -406,16 +397,19 @@ export class TerminalAgent {
 
   private async getLLMResponse(
     messages: ChatMessage[],
-    isFirstTurn: boolean,
     signal?: AbortSignal
   ): Promise<
     { type: 'text'; content: string; reasoning_content?: string | null }
     | { type: 'tool_calls'; calls: ToolCall[]; content?: string | null; reasoning_content?: string | null }
   > {
-    if (isFirstTurn || !this.options.onToken || !this.options.provider.completeStream) {
-      return this.options.provider.complete(messages, TOOL_DEFINITIONS);
+    if (this.options.onToken && this.options.provider.completeStream) {
+      return this.options.provider.completeStream(messages, this.options.onToken, {
+        tools: TOOL_DEFINITIONS,
+        ...(signal ? { signal } : {}),
+        ...(this.options.onReasoning ? { onReasoning: this.options.onReasoning } : {})
+      });
     }
-    return this.options.provider.completeStream(messages, this.options.onToken, { tools: TOOL_DEFINITIONS });
+    return this.options.provider.complete(messages, TOOL_DEFINITIONS);
   }
 
   private async executeTool(call: ToolCall): Promise<string> {

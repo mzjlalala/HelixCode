@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { createInterface } from 'node:readline/promises';
+import { emitKeypressEvents } from 'node:readline';
 import type { CompleterResult } from 'node:readline';
 import { stdin as input, stdout as output } from 'node:process';
+import { writeSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -15,6 +17,11 @@ import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS 
 import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-action.js';
 import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.js';
 import { showWelcome, style, SYMBOL } from './style.js';
+import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
+
+const INV_BG = '\x1b[48;5;236m\x1b[38;5;255m';
+const FG_RESTORE = '\x1b[38;5;255m';
+const RESET = '\x1b[0m';
 
 // Top-level error boundary
 process.on('unhandledRejection', (reason) => {
@@ -58,6 +65,7 @@ program
   });
 
 let currentAbort: AbortController | null = null;
+let currentMode: PermissionMode = 'default';
 let streamedThisTurn = false;
 let lastOutput: 'reasoning' | 'content' | null = null;
 let turnStartMs = 0;
@@ -151,15 +159,30 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
     return;
   }
 
-  const rl = createInterface({
-    input,
-    output,
-    completer: (line: string): CompleterResult => {
-      if (!line.trimStart().startsWith('/')) return [[], line];
-      const candidates = completeSlashCommand(line);
-      return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
+  const completer = (line: string): CompleterResult => {
+    if (!line.trimStart().startsWith('/')) return [[], line];
+    const candidates = completeSlashCommand(line);
+    return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
+  };
+
+  // Prep listener BEFORE createInterface so our handler fires before readline's
+  let modeCyclePending = false;
+  let rl: ReturnType<typeof createInterface>;
+  emitKeypressEvents(input);
+  input.prependListener('keypress', (_str: string, key: { name?: string; shift?: boolean }) => {
+    if (key && key.name === 'tab' && key.shift && !closing) {
+      currentMode = cycleMode(currentMode);
+      modeCyclePending = true;
+
+      // Redraw prompt immediately with new mode tag (no newline)
+      if (rl) {
+        rl.setPrompt(`${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} > `);
+        rl.prompt(true); // preserve cursor position
+      }
     }
   });
+
+  rl = createInterface({ input, output, completer });
   let closing = false;
 
   rl.on('SIGINT', () => {
@@ -177,13 +200,29 @@ export async function runRepl(cwd: string, modelOverride?: string): Promise<void
   while (!closing) {
     let line: string;
     try {
-      line = (await rl.question('> ')).trim();
+      if (modeCyclePending) {
+        modeCyclePending = false;
+        output.write(`${RESET}\n${style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`)}\n`);
+      }
+      // Use setPrompt + prompt() + raw question('') so _prompt contains the full tag.
+      // question('') writes nothing extra but properly captures the line input.
+      rl.setPrompt(`${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} > `);
+      rl.prompt();
+      line = (await new Promise<string>((resolve) => {
+        const handler = () => resolve('');
+        rl.on('close', handler);
+        rl.question('').then((l) => {
+          rl.off('close', handler);
+          resolve(l);
+        });
+      })).trim();
     } catch {
       if (!closing) output.write(`\n${style.dim('Goodbye.')}\n`);
       break;
+    } finally {
+      output.write(RESET);
     }
     if (!line) continue;
-    output.write(`\n`);
     if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl })) break;
   }
 
@@ -214,6 +253,10 @@ async function handleInputLine(
   if (slash.handled) {
     if (slash.model) {
       context.runtime.model = slash.model;
+    }
+    if (slash.cycleMode) {
+      currentMode = cycleMode(currentMode);
+      slash.output = style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`);
     }
     if (slash.compact) {
       context.agent.compactHistory(slash.compactKeep ?? 20);
@@ -265,14 +308,7 @@ async function handleAgentResult(
   }
 ): Promise<void> {
   if (result.type === 'final') {
-    // Display timing timeline first (before response, after user question)
-    const merged = mergeAgentTimeline(result.timeline, cliTimings);
-    const totalWallClock = performance.now() - turnStartMs;
-    if (merged.length > 0 || cliTimings.length > 0) {
-      output.write(`${formatTimeline(merged, totalWallClock)}\n`);
-    }
-    cliTimings = [];
-
+    // Write response message first
     const message = !streamedThisTurn ? stripMarkdown(result.message) : '';
     if (!streamedThisTurn) {
       const prefix = lastOutput ? '\n' : '';
@@ -280,6 +316,14 @@ async function handleAgentResult(
     } else {
       output.write('\n');
     }
+
+    // Then timing
+    const merged = mergeAgentTimeline(result.timeline, cliTimings);
+    const totalWallClock = performance.now() - turnStartMs;
+    if (merged.length > 0 || cliTimings.length > 0) {
+      output.write(`${formatTimeline(merged, totalWallClock)}\n`);
+    }
+    cliTimings = [];
     streamedThisTurn = false;
     lastOutput = null;
     return;
@@ -292,6 +336,25 @@ async function handleAgentResult(
   output.write(`${style.label('┈')} ${style.bold(result.tool.replace(/_/g, ' '))}  ${style.dim(result.summary)}\n`);
   const preview = await previewConfirmedTool(context.config.cwd, result);
   output.write(`${preview}\n`);
+
+  // Permission mode: plan → auto-skip
+  if (shouldSkip(result.tool, currentMode)) {
+    context.agent.recordSkippedConfirmation(result);
+    output.write(`${style.dim(`${SYMBOL.info} ${MODE_LABELS[currentMode].label}: skipped ${result.tool}`)}\n`);
+    return;
+  }
+
+  // Permission mode: auto-approve (auto / acceptEdits)
+  if (shouldAutoApprove(result.tool, currentMode)) {
+    output.write(`${style.dim(`${MODE_LABELS[currentMode].label}: auto-approved`)}\n`);
+    const toolStart = performance.now();
+    const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    cliTimings.push({ label: result.tool, totalMs: performance.now() - toolStart, calls: 1 });
+    output.write(`${formatConfirmedToolResult(commandResult)}\n`);
+    const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
+    await handleAgentResult(followUp, context);
+    return;
+  }
 
   if (!context.rl && context.autoConfirm !== true) {
     output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.dim('Command skipped in non-interactive mode.')}\n`);
@@ -417,17 +480,20 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     provider,
     projectInstructions,
     onToken: (token) => {
-      stopTimerAndFreeze(); // Freeze spinner before first streaming token
+      stopTimerAndFreeze();
       streamedThisTurn = true;
-      if (lastOutput === 'reasoning') output.write('\n');
+      if (lastOutput === 'reasoning') writeSync(1, '\n');
       lastOutput = 'content';
-      output.write(token);
+      // Write in small synchronous bursts so Windows console renders progressively
+      for (let i = 0; i < token.length; i += 4) {
+        writeSync(1, token.slice(i, i + 4));
+      }
     },
     onReasoning: (text) => {
-      stopTimerAndFreeze(); // Freeze spinner before first reasoning token
-      if (lastOutput === 'content') output.write('\n');
+      stopTimerAndFreeze();
+      if (lastOutput === 'content') writeSync(1, '\n');
       lastOutput = 'reasoning';
-      output.write(`\x1b[2m\x1b[3m${text}\x1b[0m`);
+      writeSync(1, `\x1b[2m\x1b[3m${text}\x1b[0m`);
     }
   });
   return { config, projectInstructions, runtime, agent };

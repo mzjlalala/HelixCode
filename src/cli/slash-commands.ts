@@ -11,6 +11,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: '/status', description: 'Show current project, model, and session state' },
   { name: '/doctor', description: 'Show local HelixCode diagnostics' },
   { name: '/model', description: 'Show or switch the current chat model', usage: '/model <name>' },
+  { name: '/mode', description: 'Cycle permission mode (default/edit/plan/auto)' },
   { name: '/history', description: 'Show current session history size' },
   { name: '/plan', description: 'Show current session plan' },
   { name: '/compact', description: 'Compact session history', usage: '/compact [keep]' },
@@ -53,6 +54,7 @@ export type SlashCommandResult =
       compact?: boolean;
       compactKeep?: number;
       model?: string;
+      cycleMode?: true;
     }
   | { handled: false };
 
@@ -89,7 +91,7 @@ export function handleSlashCommand(
     return { handled: true, exit: false, clear: true, output: 'Session cleared.' };
   }
 
-  if (command === '/model') {
+  if (command === '/model' && !input.trim().startsWith('/model ')) {
     return {
       handled: true,
       exit: false,
@@ -203,6 +205,16 @@ export function handleSlashCommand(
 
   if (command === '/exit' || command === '/quit' || command === '/q') {
     return { handled: true, exit: true, clear: false, output: 'Goodbye.' };
+  }
+
+  if (command === '/mode') {
+    return {
+      handled: true,
+      exit: false,
+      clear: false,
+      cycleMode: true,
+      output: ''
+    };
   }
 
   // "/" alone shows available commands (useful when Tab completion doesn't work on some terminals)

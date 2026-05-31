@@ -8,7 +8,7 @@ import { createDoctorOutput, formatMissingApiKeyMessage, formatOneShotGitSummary
 
 describe('slash commands', () => {  it('completes slash commands by prefix with descriptions', () => {
     expect(completeSlashCommand('/d')).toEqual(['/doctor']);
-    expect(completeSlashCommand('/mo')).toEqual(['/model']);
+    expect(completeSlashCommand('/mo')).toContain('/model');
 
     const candidates = formatSlashCommandCandidates('/');
     expect(candidates).toContain('/help');

@@ -11,7 +11,7 @@ export const style = {
   dim: (t: string) => ansi(2, t),
   italic: (t: string) => ansi(3, t),
 
-  // Colors
+  // Colors (foreground)
   cyan: (t: string) => ansi(36, t),
   green: (t: string) => ansi(32, t),
   yellow: (t: string) => ansi(33, t),
