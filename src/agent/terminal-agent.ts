@@ -1,7 +1,5 @@
-import { gitDiffTool, gitStatusTool } from '../tools/git.js';
-import { readFileTool, searchFilesTool, listFilesTool } from '../tools/filesystem.js';
-import { webSearchTool, webFetchTool } from '../tools/web.js';
-import { classifyShellCommand } from '../tools/shell.js';
+﻿import { classifyShellCommand } from '../tools/shell.js';
+import { createDefaultRegistry, ToolRegistry } from '../tools/registry.js';
 import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
 import type { ProjectInstruction } from '../core/config.js';
@@ -34,162 +32,7 @@ export interface PlanItem {
   status: PlanItemStatus;
 }
 
-const TOOL_DEFINITIONS: ToolDefinition[] = [
-  {
-    name: 'read_file',
-    description: 'Read a project file, optionally by line range',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to project root' },
-        startLine: { type: 'number', description: 'Optional start line (1-based)' },
-        endLine: { type: 'number', description: 'Optional end line (inclusive)' }
-      },
-      required: ['path']
-    }
-  },
-  {
-    name: 'search_files',
-    description: 'Search file contents with optional glob, case sensitivity, result limits, and context lines',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Text to search for' },
-        glob: { type: 'string', description: 'Optional glob pattern (e.g. *.ts)' },
-        caseSensitive: { type: 'boolean', description: 'Case sensitive search' },
-        maxResults: { type: 'number', description: 'Maximum results to return' },
-        contextLines: { type: 'number', description: 'Lines of context around each match' }
-      },
-      required: ['query']
-    }
-  },
-  {
-    name: 'list_files',
-    description: 'List all project files (excluding .git, node_modules, dist)',
-    parameters: { type: 'object', properties: {} }
-  },
-  {
-    name: 'git_status',
-    description: 'Show git working tree status',
-    parameters: { type: 'object', properties: {} }
-  },
-  {
-    name: 'git_diff',
-    description: 'Show git diff (unstaged changes)',
-    parameters: { type: 'object', properties: {} }
-  },
-  {
-    name: 'update_plan',
-    description: 'Track multi-step work by setting plan items with pending/in_progress/completed status',
-    parameters: {
-      type: 'object',
-      properties: {
-        items: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              step: { type: 'string' },
-              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] }
-            },
-            required: ['step', 'status']
-          }
-        }
-      },
-      required: ['items']
-    }
-  },
-  {
-    name: 'web_search',
-    description: 'Search the web via Bing. No API key required.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query' },
-        count: { type: 'number', description: 'Number of results (max 10)' }
-      },
-      required: ['query']
-    }
-  },
-  {
-    name: 'web_fetch',
-    description: 'Fetch a URL and return its readable text content. No API key required.',
-    parameters: {
-      type: 'object',
-      properties: {
-        url: { type: 'string', description: 'URL to fetch' }
-      },
-      required: ['url']
-    }
-  },
-  {
-    name: 'write_file',
-    description: 'Write content to a file (requires user confirmation)',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path relative to project root' },
-        content: { type: 'string', description: 'File content to write' }
-      },
-      required: ['path', 'content']
-    },
-    confirm: true
-  },
-  {
-    name: 'replace_in_file',
-    description: 'Replace exact text in a file (requires user confirmation)',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'File path' },
-        oldText: { type: 'string', description: 'Exact text to replace' },
-        newText: { type: 'string', description: 'Replacement text' },
-        replaceAll: { type: 'boolean', description: 'Replace all occurrences' }
-      },
-      required: ['path', 'oldText', 'newText']
-    },
-    confirm: true
-  },
-  {
-    name: 'edit_file',
-    description: 'Replace an inclusive line range in a file (requires user confirmation)',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string' },
-        startLine: { type: 'number' },
-        endLine: { type: 'number' },
-        content: { type: 'string', description: 'New content for the specified line range' }
-      },
-      required: ['path', 'startLine', 'endLine', 'content']
-    },
-    confirm: true
-  },
-  {
-    name: 'apply_patch',
-    description: 'Apply a unified diff patch to project files (requires user confirmation)',
-    parameters: {
-      type: 'object',
-      properties: {
-        patch: { type: 'string', description: 'Unified diff content' }
-      },
-      required: ['patch']
-    },
-    confirm: true
-  },
-  {
-    name: 'run_shell',
-    description: 'Run a shell command in the project directory (requires user confirmation)',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to execute' }
-      },
-      required: ['command']
-    },
-    confirm: true
-  }
-];
+// ── Timeline helper ──────────────────────────────────────────
 
 class Timeline {
   private entries = new Map<string, { totalMs: number; calls: number }>();
@@ -212,12 +55,13 @@ class Timeline {
   }
 }
 
-const CONFIRMED_TOOLS = new Set(TOOL_DEFINITIONS.filter((t) => t.confirm).map((t) => t.name));
+// ── TerminalAgent ────────────────────────────────────────────
 
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
   private readonly plan: PlanItem[] = [];
   private readonly timeline = new Timeline();
+  private readonly registry: ToolRegistry;
 
   constructor(private readonly options: {
     cwd: string;
@@ -225,7 +69,13 @@ export class TerminalAgent {
     projectInstructions?: ProjectInstruction[];
     onToken?: (token: string) => void;
     onReasoning?: (text: string) => void;
-  }) {}
+    /** Inject a custom tool registry (defaults to the built-in one). */
+    registry?: ToolRegistry;
+  }) {
+    this.registry = options.registry ?? createDefaultRegistry();
+    // Wire up the agent-owned update_plan callback
+    this.registry.setUpdatePlan((args) => JSON.stringify(this.updatePlan(args)));
+  }
 
   async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
     this.timeline.reset();
@@ -303,6 +153,13 @@ export class TerminalAgent {
     return this.plan.map((item) => ({ ...item }));
   }
 
+  /** Tool registry used by this agent (share with confirmation UI). */
+  getToolRegistry(): ToolRegistry {
+    return this.registry;
+  }
+
+  // ── Private run loop ──────────────────────────────────────
+
   private async completeTurn(turnMessages: ChatMessage[], signal?: AbortSignal): Promise<AgentTurnResult> {
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
@@ -332,7 +189,7 @@ export class TerminalAgent {
             reasoning_content: reasoningContent
           });
 
-          if (call.name === 'run_shell') {
+          if (this.registry.hasShellRisk(call.name)) {
             const command = String(call.arguments.command ?? '').trim();
             const risk = classifyShellCommand(command);
             if (risk.risk === 'blocked') {
@@ -347,15 +204,15 @@ export class TerminalAgent {
             this.appendHistory(turnMessages);
             return {
               type: 'confirmation',
-              tool: 'run_shell',
-              args: { command },
-              summary: toolSummary('run_shell', { command }),
+              tool: call.name,
+              args: call.arguments,
+              summary: toolSummary(call.name, call.arguments),
               tool_call_id: call.id,
               timeline: this.timeline.snapshot()
             };
           }
 
-          if (CONFIRMED_TOOLS.has(call.name)) {
+          if (this.registry.isConfirmed(call.name)) {
             this.appendHistory(turnMessages);
             return {
               type: 'confirmation',
@@ -402,8 +259,8 @@ export class TerminalAgent {
       // Legacy JSON protocol fallback (for models that don't support native tool calling)
       turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
 
-      if (CONFIRMED_TOOLS.has(request.tool)) {
-        if (request.tool === 'run_shell') {
+      if (this.registry.isConfirmed(request.tool)) {
+        if (this.registry.hasShellRisk(request.tool)) {
           const command = String(request.args?.command ?? '').trim();
           const risk = classifyShellCommand(command);
           if (risk.risk === 'blocked') {
@@ -452,57 +309,25 @@ export class TerminalAgent {
     { type: 'text'; content: string; reasoning_content?: string | null }
     | { type: 'tool_calls'; calls: ToolCall[]; content?: string | null; reasoning_content?: string | null }
   > {
+    const definitions = this.registry.getDefinitions();
     if (this.options.onToken && this.options.provider.completeStream) {
       return this.options.provider.completeStream(messages, this.options.onToken, {
-        tools: TOOL_DEFINITIONS,
+        tools: definitions,
         ...(signal ? { signal } : {}),
         ...(this.options.onReasoning ? { onReasoning: this.options.onReasoning } : {})
       });
     }
-    return this.options.provider.complete(messages, TOOL_DEFINITIONS);
+    return this.options.provider.complete(messages, definitions);
   }
 
+  /** Dispatch a safe tool call through the registry. */
   private async executeTool(call: ToolCall, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) return JSON.stringify({ ok: false, error: 'Interrupted.' });
 
     const start = performance.now();
     try {
-      const args = call.arguments;
-
-      if (call.name === 'read_file') {
-        return JSON.stringify(await readFileTool(this.options.cwd, {
-          path: args.path, startLine: args.startLine, endLine: args.endLine
-        }, signal));
-      }
-      if (call.name === 'search_files') {
-        return JSON.stringify(await searchFilesTool(this.options.cwd, {
-          query: args.query, glob: args.glob, caseSensitive: args.caseSensitive,
-          maxResults: args.maxResults, contextLines: args.contextLines
-        }, signal));
-      }
-      if (call.name === 'list_files') {
-        return JSON.stringify(await listFilesTool(this.options.cwd, signal));
-      }
-      if (call.name === 'git_status') {
-        return await gitStatusTool(this.options.cwd, signal);
-      }
-      if (call.name === 'git_diff') {
-        return await gitDiffTool(this.options.cwd, signal);
-      }
-      if (call.name === 'update_plan') {
-        return JSON.stringify(this.updatePlan(args));
-      }
-      if (call.name === 'web_search') {
-        return JSON.stringify(await webSearchTool(
-          String(args.query ?? ''),
-          typeof args.count === 'number' ? args.count : undefined
-        ));
-      }
-      if (call.name === 'web_fetch') {
-        return JSON.stringify(await webFetchTool(String(args.url ?? '')));
-      }
-
-      return JSON.stringify({ ok: false, error: `Unknown tool: ${call.name}` });
+      const args = call.arguments ?? {};
+      return await this.registry.executeSafe(call.name, this.options.cwd, args, signal);
     } finally {
       this.timeline.record(call.name, performance.now() - start);
     }
@@ -568,12 +393,12 @@ export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): st
     '  If a tool returns an error, read the error and recover.',
     '',
     'Available tools:',
-    '  read_file, search_files, list_files — explore files',
-    '  write_file, replace_in_file, edit_file, apply_patch — edit files (requires confirmation)',
-    '  git_status, git_diff — check git state',
-    '  web_search, web_fetch — research online',
-    '  run_shell — run commands (requires confirmation)',
-    '  update_plan — track multi-step work',
+    '  read_file, search_files, list_files - explore files',
+    '  write_file, replace_in_file, edit_file, apply_patch - edit files (requires confirmation)',
+    '  git_status, git_diff - check git state',
+    '  web_search, web_fetch - research online',
+    '  run_shell - run commands (requires confirmation)',
+    '  update_plan - track multi-step work',
   ];
 
   for (const instruction of projectInstructions) {

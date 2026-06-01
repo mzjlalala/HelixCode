@@ -381,7 +381,7 @@ async function handleAgentResult(
   lastOutput = null;
 
   output.write(`${style.label('┈')} ${style.bold(result.tool.replace(/_/g, ' '))}  ${style.dim(result.summary)}\n`);
-  const preview = await previewConfirmedTool(context.config.cwd, result);
+  const preview = await previewConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
   output.write(`${preview}\n`);
 
   // Permission mode: plan → auto-skip
@@ -395,7 +395,7 @@ async function handleAgentResult(
   if (shouldAutoApprove(result.tool, currentMode)) {
     output.write(`${style.dim(`${MODE_LABELS[currentMode].label}: auto-approved`)}\n`);
     const toolStart = performance.now();
-    const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    const commandResult = await executeConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
     cliTimings.push({ label: result.tool, totalMs: performance.now() - toolStart, calls: 1 });
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
@@ -429,7 +429,7 @@ async function handleAgentResult(
     }
     output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.green('Auto-approved by --yes.')}\n`);
     const toolStart = performance.now();
-    const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    const commandResult = await executeConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
     cliTimings.push({ label: result.tool, totalMs: performance.now() - toolStart, calls: 1 });
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);
@@ -442,7 +442,7 @@ async function handleAgentResult(
   const answer = (await rl.question(`${style.dim('Proceed? [y/N]')} `)).trim().toLowerCase();
   if (answer === 'y' || answer === 'yes') {
     const toolStart = performance.now();
-    const commandResult = await executeConfirmedTool(context.config.cwd, result);
+    const commandResult = await executeConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
     cliTimings.push({ label: result.tool, totalMs: performance.now() - toolStart, calls: 1 });
     output.write(`${formatConfirmedToolResult(commandResult)}\n`);
     const followUp = await context.agent.continueAfterConfirmation(result, commandResult);

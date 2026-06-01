@@ -12,8 +12,10 @@ afterEach(() => {
 
 describe('loadConfig', () => {
   it('loads HelixCode defaults', () => {
+    delete process.env.HELIX_PROVIDER;
     delete process.env.HELIX_API_KEY;
     delete process.env.HELIX_CHAT_MODEL;
+    delete process.env.HELIX_MODEL;
     delete process.env.HELIX_BASE_URL;
 
     const config = loadConfig({ cwd: 'D:/work/repo' });

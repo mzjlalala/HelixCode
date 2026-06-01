@@ -176,7 +176,7 @@ describe('TerminalAgent', () => {  it('builds a versatile system prompt for gene
     expect(result.type).toBe('confirmation');
     if (result.type === 'confirmation') {
       expect(result.tool).toBe('write_file');
-      const confirmed = await executeConfirmedTool(cwd, result);
+      const confirmed = await executeConfirmedTool(cwd, result, agent.getToolRegistry());
       expect(confirmed.ok).toBe(true);
     }
   });
@@ -233,7 +233,7 @@ describe('TerminalAgent', () => {  it('builds a versatile system prompt for gene
 
     expect(result.type).toBe('confirmation');
     if (result.type === 'confirmation') {
-      const confirmed = await executeConfirmedTool(cwd, result);
+      const confirmed = await executeConfirmedTool(cwd, result, agent.getToolRegistry());
       const followUp = await agent.continueAfterConfirmation(result, confirmed);
 
       expect(followUp.type).toBe('final');

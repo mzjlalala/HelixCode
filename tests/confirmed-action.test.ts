@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { previewConfirmedTool } from '../src/agent/confirmed-action.js';
+import { createDefaultRegistry } from '../src/tools/registry.js';
+
+const registry = createDefaultRegistry();
 
 describe('confirmed action previews', () => {
   it('previews write_file overwrite actions with a compact diff', async () => {
@@ -15,7 +18,7 @@ describe('confirmed action previews', () => {
       args: { path: 'README.md', content: 'new line\nkept\n' },
       summary: 'Write file: README.md',
       tool_call_id: 'test'
-    });
+    }, registry);
 
     expect(preview).toContain('README.md');
     expect(preview).toContain('-old line');
@@ -41,7 +44,7 @@ describe('confirmed action previews', () => {
       },
       summary: 'Apply patch to project files',
       tool_call_id: 'test'
-    });
+    }, registry);
 
     expect(preview).toContain('README.md');
     expect(preview).toContain('-old');
@@ -58,7 +61,7 @@ describe('confirmed action previews', () => {
       args: { path: 'README.md', oldText: 'old line', newText: 'new line' },
       summary: 'Replace text in file: README.md',
       tool_call_id: 'test'
-    });
+    }, registry);
 
     expect(preview).toContain('README.md');
     expect(preview).toContain('-old line');
@@ -75,7 +78,7 @@ describe('confirmed action previews', () => {
       args: { path: 'README.md', startLine: 2, endLine: 2, content: 'TWO' },
       summary: 'Edit file: README.md lines 2-2',
       tool_call_id: 'test'
-    });
+    }, registry);
 
     expect(preview).toContain('README.md');
     expect(preview).toContain('-two');
@@ -91,7 +94,7 @@ describe('confirmed action previews', () => {
       args: { command: 'npm test' },
       summary: 'Run shell command: npm test',
       tool_call_id: 'test'
-    });
+    }, registry);
 
     expect(preview).toContain('npm test');
     expect(preview).toMatch(/confirm|confirmation/);
