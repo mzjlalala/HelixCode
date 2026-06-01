@@ -1,3 +1,9 @@
+/**
+ * HelixCode 配置模块
+ *
+ * 负责从环境变量与 `.helix/config.json` 加载运行时配置，识别 LLM Provider（OpenAI / DeepSeek / 自定义），
+ * 解析 API Key、模型与 Base URL，并加载项目级指令文件（AGENTS.md 等）供 Agent 系统提示使用。
+ */
 import 'dotenv/config';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
@@ -40,6 +46,7 @@ export interface SessionSettings {
   compactKeepMessages: number;
 }
 
+/** 将 `.helix/config.json` 中的会话限制字段解析为带默认值的 SessionSettings。 */
 export function resolveSessionSettings(file: HelixFileConfig = {}): SessionSettings {
   return {
     maxToolRounds: positiveInt(file.maxToolRounds, DEFAULT_MAX_TOOL_ROUNDS),
@@ -48,6 +55,7 @@ export function resolveSessionSettings(file: HelixFileConfig = {}): SessionSetti
   };
 }
 
+/** 校验正整数，无效时回退到默认值。 */
 function positiveInt(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
 }
@@ -59,6 +67,10 @@ export interface ProjectInstruction {
 
 const CONFIG_FILENAME = '.helix/config.json';
 
+/**
+ * 从环境变量加载 Helix 运行时配置（Provider、API Key、模型、Base URL）。
+ * CLI `--model` 等标志在调用方覆盖，此处不读取文件配置。
+ */
 export function loadConfig(options: { cwd?: string } = {}): HelixConfig {
   const provider = normalizeProvider(process.env.HELIX_PROVIDER);
   const defaults = providerDefaults(provider);
@@ -73,7 +85,7 @@ export function loadConfig(options: { cwd?: string } = {}): HelixConfig {
   };
 }
 
-/** Load the file-based config from .helix/config.json */
+/** 从 `.helix/config.json` 读取项目文件配置；文件不存在时返回空对象。 */
 export async function loadFileConfig(cwd: string): Promise<HelixFileConfig> {
   try {
     const content = await readFile(resolve(cwd, CONFIG_FILENAME), 'utf8');
@@ -86,7 +98,10 @@ export async function loadFileConfig(cwd: string): Promise<HelixFileConfig> {
   }
 }
 
-/** Merge file config into env-based config (file config takes precedence) */
+/**
+ * 将文件配置合并进环境变量配置。
+ * 仅当未设置 HELIX_CHAT_MODEL / HELIX_MODEL 环境变量时，才用文件中的 model 覆盖。
+ */
 export function mergeFileConfig(base: HelixConfig, file: HelixFileConfig): HelixConfig {
   if (file.model && !process.env.HELIX_CHAT_MODEL && !process.env.HELIX_MODEL) {
     base.model = file.model;
@@ -94,7 +109,7 @@ export function mergeFileConfig(base: HelixConfig, file: HelixFileConfig): Helix
   return base;
 }
 
-/** Save/update .helix/config.json, preserving existing fields */
+/** 增量保存 `.helix/config.json`，保留已有字段并与 partial 浅合并。 */
 export async function saveFileConfig(
   cwd: string,
   partial: Partial<HelixFileConfig>
@@ -107,22 +122,29 @@ export async function saveFileConfig(
   return merged;
 }
 
+/** 读取项目权限模式（default | acceptEdits | plan | auto）。 */
 export async function loadPermissionMode(cwd: string): Promise<PermissionMode | undefined> {
   const config = await loadFileConfig(cwd);
   return config.permissionMode;
 }
 
+/** 持久化权限模式到 `.helix/config.json`。 */
 export async function savePermissionMode(cwd: string, mode: PermissionMode): Promise<void> {
   await saveFileConfig(cwd, { permissionMode: mode });
 }
 
+/**
+ * 识别 LLM Provider：优先读 HELIX_PROVIDER，其次根据 Base URL 推断 DeepSeek，默认 OpenAI。
+ */
 function normalizeProvider(value: string | undefined): LlmProvider {
   const normalized = value?.trim().toLowerCase();
   if (normalized === 'deepseek' || normalized === 'openai' || normalized === 'custom') return normalized;
+  // Base URL 含 deepseek.com 时自动识别为 DeepSeek
   if (process.env.HELIX_BASE_URL?.toLowerCase().includes('deepseek.com')) return 'deepseek';
   return 'openai';
 }
 
+/** 按 Provider 优先级解析 API Key（各 Provider 环境变量顺序不同）。 */
 function resolveApiKey(provider: LlmProvider): string {
   if (provider === 'deepseek') {
     return process.env.DEEPSEEK_API_KEY
@@ -137,6 +159,7 @@ function resolveApiKey(provider: LlmProvider): string {
     ?? '';
 }
 
+/** 各 Provider 的默认模型与 API Base URL。 */
 function providerDefaults(provider: LlmProvider): { model: string; baseURL: string } {
   if (provider === 'deepseek') {
     return { model: 'deepseek-chat', baseURL: 'https://api.deepseek.com' };
@@ -144,14 +167,18 @@ function providerDefaults(provider: LlmProvider): { model: string; baseURL: stri
   return { model: 'gpt-4o', baseURL: 'https://api.openai.com/v1' };
 }
 
+/**
+ * 加载项目指令文件内容，注入 Agent 系统提示。
+ * 合并 config.json 中声明的路径与默认路径（AGENTS.md、.helix/instructions.md），去重后依次读取。
+ */
 export async function loadProjectInstructions(cwd: string): Promise<ProjectInstruction[]> {
   const instructions: ProjectInstruction[] = [];
 
-  // Load from .helix/config.json first if specified
+  // 优先使用 config.json 中配置的 instructions 路径
   const fileConfig = await loadFileConfig(cwd);
   const configPaths = fileConfig.instructions ?? [];
 
-  // Default paths always checked
+  // 默认路径始终尝试加载
   const allPaths = [...new Set([...configPaths, 'AGENTS.md', '.helix/instructions.md'])];
 
   for (const path of allPaths) {

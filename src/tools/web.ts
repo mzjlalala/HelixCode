@@ -1,10 +1,9 @@
 ﻿/**
- * Web tool — web_search and web_fetch for the agent.
+ * 网络工具：为 Agent 提供 web_search 与 web_fetch。
  *
- * web_search: Primary path uses Bing Web Search API (HELIX_BING_API_KEY).
- *   Falls back to HTML scraping of cn.bing.com with 4 layered parsing
- *   strategies so a single mark-up change won't break search entirely.
- * web_fetch: fetches a URL and extracts readable text content (blocks private URLs).
+ * web_search：优先使用 Bing API（HELIX_BING_API_KEY）；
+ *   否则抓取 cn.bing.com，并用 4 层解析策略降低页面改版导致整站失效的风险。
+ * web_fetch：抓取 URL 并提取可读文本，拦截内网/私有地址（SSRF 防护）。
  */
 
 import { WEB_SEARCH_DEFAULT_COUNT, WEB_SEARCH_MAX_COUNT } from '../core/constants.js';
@@ -25,6 +24,7 @@ const API_TIMEOUT_MS = 8_000;
 
 // ── web_search ──────────────────────────────────────────────
 
+/** 网页搜索：API 优先，失败则 HTML 抓取 */
 export async function webSearchTool(
   query: string,
   count?: number
@@ -33,14 +33,14 @@ export async function webSearchTool(
 
   const maxResults = Math.min(Math.max(count ?? WEB_SEARCH_DEFAULT_COUNT, 1), WEB_SEARCH_MAX_COUNT);
 
-  // 1) Try Bing Web Search API when a key is configured
+  // 1) 配置了密钥时走 Bing Web Search API
   const apiKey = process.env.HELIX_BING_API_KEY?.trim();
   if (apiKey) {
     const apiResult = await tryBingApi(query, maxResults, apiKey);
     if (apiResult) return apiResult;
   }
 
-  // 2) Fall back to HTML scraping
+  // 2) 回退到 cn.bing.com HTML 抓取
   return scrapeBingHtml(query, maxResults);
 }
 
@@ -76,7 +76,7 @@ async function tryBingApi(
     clearTimeout(timer);
 
     if (!response.ok) {
-      // API key invalid or quota exceeded — don't retry, fall through to HTML
+      // 密钥无效或配额用尽 — 不重试，交给 HTML 回退
       return null;
     }
 
@@ -108,7 +108,7 @@ async function tryBingApi(
     return { ok: true, content, results };
   } catch {
     clearTimeout(timer);
-    // Timeout or network error — fall through to HTML
+    // 超时或网络错误 — 交给 HTML 回退
     return null;
   }
 }
@@ -183,6 +183,7 @@ async function scrapeBingHtml(
 
 // ── Bing HTML parsing strategies ────────────────────────────
 
+/** 依次尝试多种 HTML 解析策略，直至得到结果 */
 function parseBingResults(html: string, maxResults: number): WebSearchResult[] {
   const strategies = [
     parseBAlgoStrategy,
@@ -199,7 +200,7 @@ function parseBingResults(html: string, maxResults: number): WebSearchResult[] {
   return [];
 }
 
-/** Strategy 1: Bing's `<li class="b_algo">` blocks. */
+/** 策略 1：解析 `<li class="b_algo">` 结果块 */
 function parseBAlgoStrategy(html: string, maxResults: number): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const items = html.split('<li class="b_algo"');
@@ -223,7 +224,7 @@ function parseBAlgoStrategy(html: string, maxResults: number): WebSearchResult[]
   return results;
 }
 
-/** Strategy 2: `<ol id="b_results">` container with per-result `<li>` blocks. */
+/** 策略 2：解析 `<ol id="b_results">` 内的 `<li>` 条目 */
 function parseBResultsStrategy(html: string, maxResults: number): WebSearchResult[] {
   const results: WebSearchResult[] = [];
 
@@ -236,11 +237,11 @@ function parseBResultsStrategy(html: string, maxResults: number): WebSearchResul
   const items = container.split(/<li[\s>]/i);
 
   for (const item of items.slice(1, maxResults + 1)) {
-    // Bing uses <h2><a ...>Title</a></h2> for result titles
+    // 标题通常在 <h2><a> 中
     const titleMatch = item.match(
       /<h2[^>]*>[\s\S]*?<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i
     );
-    // Fallback: any <a> with an http href and reasonable text
+    // 回退：任意带 http href 且文本长度合理的 <a>
     const fallbackMatch = item.match(
       /<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]{5,200}?)<\/a>/i
     );
@@ -266,12 +267,11 @@ function parseBResultsStrategy(html: string, maxResults: number): WebSearchResul
   return results;
 }
 
-/** Strategy 3: Any `<h2>` with a link — common across Bing redesigns. */
+/** 策略 3：任意带链接的 `<h2>`（改版后常见） */
 function parseH2LinkStrategy(html: string, maxResults: number): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const seen = new Set<string>();
 
-  // Match <h2 ...> <a href="...">text</a> ... </h2> style blocks
   const h2Re = /<h2[^>]*>[\s\S]*?<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h2>/gi;
   let match: RegExpExecArray | null;
 
@@ -290,12 +290,11 @@ function parseH2LinkStrategy(html: string, maxResults: number): WebSearchResult[
   return results;
 }
 
-/** Strategy 4: Generic link extraction — last resort. */
+/** 策略 4：通用链接提取（最后手段） */
 function parseGenericStrategy(html: string, maxResults: number): WebSearchResult[] {
   const results: WebSearchResult[] = [];
   const seen = new Set<string>();
 
-  // Match <a href="http...">text</a> with at least 10 chars of text
   const linkRe =
     /<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]{10,300}?)<\/a>/gi;
   let match: RegExpExecArray | null;
@@ -304,7 +303,7 @@ function parseGenericStrategy(html: string, maxResults: number): WebSearchResult
     const url = (match[1] ?? '').replace(/&amp;/g, '&');
     const title = stripTags(match[2] ?? '').trim();
 
-    // Filter out navigation / utility links
+    // 过滤导航、分页等无关链接
     if (
       !url.startsWith('http') ||
       seen.has(url) ||
@@ -326,6 +325,7 @@ function parseGenericStrategy(html: string, maxResults: number): WebSearchResult
 
 // ── web_fetch ───────────────────────────────────────────────
 
+/** 抓取 URL 正文（HTML 去标签），长度上限约 8000 字符 */
 export async function webFetchTool(urlString: string): Promise<WebToolResult> {
   if (!urlString.trim()) return { ok: false, error: 'web_fetch requires a URL.' };
 
@@ -414,7 +414,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Block SSRF targets: non-http(s), localhost, and private IP ranges. */
+/** 拦截 SSRF：非 http(s)、localhost、私有网段等 */
 export function isBlockedFetchUrl(url: URL): boolean {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return true;
 
@@ -422,12 +422,12 @@ export function isBlockedFetchUrl(url: URL): boolean {
   if (host === 'localhost' || host === '0.0.0.0' || host.endsWith('.local')) return true;
   if (host === '::1' || host.startsWith('127.')) return true;
 
-  // IPv4 private ranges
+  // IPv4 私有地址段
   if (/^10\./.test(host)) return true;
   if (/^192\.168\./.test(host)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
 
-  // IPv6 loopback / link-local / unique-local (simplified)
+  // IPv6 回环 / 链路本地 / ULA（简化判断）
   if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
 
   return false;

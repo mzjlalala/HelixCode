@@ -1,3 +1,8 @@
+/**
+ * Shell 工具：对用户确认的 shell 命令做风险分级并执行。
+ * 破坏性命令直接拦截，其余需用户确认后运行。
+ */
+
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -8,6 +13,7 @@ export interface ShellRisk {
   reason?: string;
 }
 
+/** 对 shell 命令做风险分级：blocked 直接拒绝，confirm 需用户确认 */
 export function classifyShellCommand(command: string): ShellRisk {
   if (!command.trim()) {
     return { risk: 'blocked', reason: 'run_shell requires a non-empty command.' };
@@ -36,6 +42,7 @@ export function classifyShellCommand(command: string): ShellRisk {
 const SHELL_TIMEOUT_MS = 120_000;
 const SHELL_MAX_BUFFER = 10 * 1024 * 1024;
 
+/** 在项目 cwd 下执行 shell 命令（含超时与输出缓冲上限） */
 export async function runShellCommand(
   cwd: string,
   command: string

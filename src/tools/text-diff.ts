@@ -1,6 +1,12 @@
+/**
+ * 文本 diff 工具：为确认 UI 生成紧凑的前后对比，并统计行数。
+ */
+
+/** 生成紧凑 unified 风格 diff（仅展示变更区间，可截断行数） */
 export function createCompactTextDiff(before: string, after: string, maxLines = 24): string {
   const beforeLines = splitLines(before);
   const afterLines = splitLines(after);
+  // 对齐首尾相同行，只 diff 中间变更段
   let prefix = 0;
   while (
     prefix < beforeLines.length &&
@@ -38,6 +44,7 @@ export function createCompactTextDiff(before: string, after: string, maxLines = 
   return [...header, ...clipped].join('\n');
 }
 
+/** 统计逻辑行数（统一换行，忽略末尾空行） */
 export function countTextLines(content: string): number {
   if (!content) return 0;
   return content.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n').length;

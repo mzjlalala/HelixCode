@@ -1,12 +1,21 @@
+/**
+ * 斜杠命令模块
+ *
+ * 定义 REPL 中以 `/` 开头的内置命令（help、status、model、compact 等），
+ * 负责命令补全、分发处理，以及 doctor / plan 等格式化输出。
+ */
+
 import type { PlanItem } from '../agent/terminal-agent.js';
 import type { ChatMessage } from '../llm/types.js';
 
+/** 单条斜杠命令的定义：名称、描述与可选用法 */
 export interface SlashCommandDefinition {
   name: string;
   description: string;
   usage?: string;
 }
 
+/** 所有内置斜杠命令列表（补全与 /help 共用） */
 export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: '/help', description: 'Show this help' },
   { name: '/status', description: 'Show current project, model, and session state' },
@@ -25,13 +34,21 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: '/q', description: 'Exit HelixCode' }
 ];
 
+/**
+ * 根据用户已输入前缀返回匹配的命令名列表（Tab 补全）
+ * @param input 当前输入行
+ */
 export function completeSlashCommand(input: string): string[] {
   const prefix = input.trim().toLowerCase();
   if (!prefix.startsWith('/')) return [];
   const matches = SLASH_COMMANDS.map((item) => item.name).filter((name) => name.startsWith(prefix));
+  // 无精确前缀匹配时返回全部命令，便于用户选择
   return matches.length ? matches : SLASH_COMMANDS.map((item) => item.name);
 }
 
+/**
+ * 将候选命令格式化为对齐的「用法 + 描述」多行文本
+ */
 export function formatSlashCommandCandidates(input: string): string {
   const names = new Set(completeSlashCommand(input));
   const rows = SLASH_COMMANDS.filter((item) => names.has(item.name));
@@ -42,10 +59,12 @@ export function formatSlashCommandCandidates(input: string): string {
   }).join('\n');
 }
 
+/** 生成 /help 的完整帮助文本 */
 function formatSlashHelp(): string {
   return ['HelixCode commands:', formatSlashCommandCandidates('/')].join('\n');
 }
 
+/** 斜杠命令处理结果：handled 为 false 表示非斜杠命令，交由 Agent 处理 */
 export type SlashCommandResult =
   | {
       handled: true;
@@ -62,6 +81,7 @@ export type SlashCommandResult =
     }
   | { handled: false };
 
+/** 执行斜杠命令时可用的会话上下文（由 main.ts 注入） */
 export interface SlashCommandContext {
   cwd?: string;
   model?: string;
@@ -77,6 +97,12 @@ export interface SlashCommandContext {
   maxToolRounds?: number;
 }
 
+/**
+ * 解析并执行斜杠命令
+ * @param input 用户输入行
+ * @param context 当前会话上下文
+ * @returns 处理结果；handled: false 时 caller 应继续走 Agent 流程
+ */
 export function handleSlashCommand(
   input: string,
   context: SlashCommandContext = {}
@@ -98,6 +124,7 @@ export function handleSlashCommand(
     return { handled: true, exit: false, clear: true, output: 'Session cleared.' };
   }
 
+  // 仅 /model（无参数）：显示当前模型
   if (command === '/model' && !input.trim().startsWith('/model ')) {
     return {
       handled: true,
@@ -116,6 +143,7 @@ export function handleSlashCommand(
     };
   }
 
+  // /model <name>：切换模型（由 main 写入 runtime.model）
   if (command.startsWith('/model ')) {
     const model = input.trim().slice('/model '.length).trim();
     if (!model) {
@@ -140,6 +168,7 @@ export function handleSlashCommand(
     };
   }
 
+  // /compact [keep]：压缩历史，保留最近 keep 条（默认来自 session 配置）
   if (command === '/compact' || command.startsWith('/compact ')) {
     const before = context.historyMessages ?? 0;
     const requested = parseInt(command === '/compact' ? '' : command.slice('/compact '.length).trim(), 10);
@@ -199,7 +228,7 @@ export function handleSlashCommand(
   if (command === '/history' || command.startsWith('/history ')) {
     const rest = command === '/history' ? '' : command.slice('/history '.length).trim();
 
-    // /history save
+    // /history save — 触发持久化（由 main 调用 saveAgentHistory）
     if (rest === 'save') {
       return {
         handled: true, exit: false, clear: false,
@@ -208,7 +237,7 @@ export function handleSlashCommand(
       };
     }
 
-    // /history search <keyword>
+    // /history search <keyword> — 在历史消息中搜索关键词
     if (rest.startsWith('search ')) {
       const keyword = rest.slice('search '.length).trim();
       if (!keyword) {
@@ -222,7 +251,7 @@ export function handleSlashCommand(
         .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content && m.content.toLowerCase().includes(keyword.toLowerCase()))
         .map((m) => {
           const role = m.role === 'user' ? 'Q' : 'A';
-          // Truncate long content for display
+          // 过长内容截断，避免刷屏
           const text = (m.content ?? '').length > 120
             ? (m.content ?? '').slice(0, 120) + '...'
             : (m.content ?? '');
@@ -241,7 +270,7 @@ export function handleSlashCommand(
       };
     }
 
-    // /history (plain)
+    //  plain /history — 仅显示消息条数
     return {
       handled: true, exit: false, clear: false,
       output: `Session history messages: ${context.historyMessages ?? 0}`
@@ -261,6 +290,7 @@ export function handleSlashCommand(
     return { handled: true, exit: true, clear: false, output: 'Goodbye.' };
   }
 
+  // /mode — 由 main 执行 cycleMode 并更新提示符
   if (command === '/mode') {
     return {
       handled: true,
@@ -271,6 +301,7 @@ export function handleSlashCommand(
     };
   }
 
+  // /undo — 由 main 异步调用 undoLast
   if (command === '/undo') {
     return {
       handled: true, exit: false, clear: false,
@@ -279,7 +310,7 @@ export function handleSlashCommand(
     };
   }
 
-  // "/" alone shows available commands (useful when Tab completion doesn't work on some terminals)
+  // 单独输入 "/" 时列出可用命令（部分终端 Tab 补全不可用时仍可用）
   if (command === '/') {
     return {
       handled: true,
@@ -293,6 +324,7 @@ export function handleSlashCommand(
 }
 
 
+/** 将计划项格式化为带状态标签的多行文本 */
 function formatPlan(items: PlanItem[]): string {
   if (!items.length) return 'No active plan.';
   const labels: Record<PlanItem['status'], string> = {
@@ -303,6 +335,9 @@ function formatPlan(items: PlanItem[]): string {
   return ['Current plan:', ...items.map((item) => `[${labels[item.status]}] ${item.step}`)].join('\n');
 }
 
+/**
+ * 生成环境诊断信息（/doctor 与 CLI --doctor 共用）
+ */
 export function formatDoctor(context: SlashCommandContext): string {
   return [
     'HelixCode doctor:',

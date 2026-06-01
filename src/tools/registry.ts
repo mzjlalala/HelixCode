@@ -1,4 +1,9 @@
-﻿import type { ToolDefinition } from '../llm/types.js';
+﻿/**
+ * 工具注册表：将 LLM 可调用的工具名映射到定义、执行器与确认预览。
+ * createDefaultRegistry 注册 HelixCode 内置的全部 Agent 工具。
+ */
+
+import type { ToolDefinition } from '../llm/types.js';
 import { WEB_SEARCH_MAX_COUNT } from '../core/constants.js';
 import { readFileTool, searchFilesTool, listFilesTool, writeFileTool, replaceInFileTool, editFileTool } from './filesystem.js';
 import { gitStatusTool, gitDiffTool } from './git.js';
@@ -9,12 +14,13 @@ import { countTextLines, createCompactTextDiff } from './text-diff.js';
 import { backupFile, affectedPatchFiles } from './undo.js';
 import { style } from '../cli/style.js';
 
-// ── Handler types ──────────────────────────────────────────────
+// ── 处理器类型 ──────────────────────────────────────────────
 
+/** 无需用户确认即可执行的工具上下文 */
 export interface SafeToolContext {
   cwd: string;
   signal: AbortSignal | undefined;
-  /** Callback for update_plan (agent-owned state) */
+  /** update_plan 由 Agent 注入的状态回调 */
   onUpdatePlan?: (args: Record<string, unknown>) => string;
 }
 
@@ -34,49 +40,55 @@ export type ToolPreviewHandler = (
   args: Record<string, unknown>
 ) => string | Promise<string>;
 
+/** 单个已注册工具：定义 + 可选的执行/确认/预览处理器 */
 export interface RegisteredTool {
   definition: ToolDefinition;
-  /** Execute for safe (non-confirmable) tools */
+  /** 安全工具：直接执行 */
   execute?: SafeToolHandler;
-  /** Execute for confirmed tools (after user approval) */
+  /** 需确认工具：用户批准后执行 */
   executeConfirmed?: ConfirmedToolHandler;
-  /** Preview for confirmed tools (shown to user before approval) */
+  /** 需确认工具：批准前展示的预览文本 */
   preview?: ToolPreviewHandler;
-  /** If true, this confirmed tool needs special shell-risk handling */
+  /** 为 true 时确认前需额外做 shell 风险检查（如 run_shell） */
   shellRisk?: boolean;
 }
 
-// ── Tool Registry ──────────────────────────────────────────────
+// ── 工具注册表 ──────────────────────────────────────────────
 
+/**
+ * 工具名 → RegisteredTool 的注册中心。
+ * 区分「安全工具」（executeSafe）与「需确认工具」（preview + executeConfirmed）。
+ */
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>();
   private updatePlanFn: ((args: Record<string, unknown>) => string) | null = null;
 
-  /** Inject the agent-owned update_plan handler after construction. */
+  /** 注入 Agent 持有的 update_plan 处理器（构造后调用） */
   setUpdatePlan(fn: (args: Record<string, unknown>) => string): void {
     this.updatePlanFn = fn;
   }
 
+  /** 注册或覆盖同名工具 */
   register(tool: RegisteredTool): void {
     this.tools.set(tool.definition.name, tool);
   }
 
-  /** All tool definitions for the LLM provider. */
+  /** 返回供 LLM 使用的全部工具 schema 定义 */
   getDefinitions(): ToolDefinition[] {
     return [...this.tools.values()].map((t) => t.definition);
   }
 
-  /** Returns true if this tool requires user confirmation. */
+  /** 该工具是否需要用户确认 */
   isConfirmed(name: string): boolean {
     return this.tools.get(name)?.definition.confirm === true;
   }
 
-  /** True if this confirmed tool needs shell-risk inspection before confirmation. */
+  /** 确认前是否需做 shell 风险分级（run_shell） */
   hasShellRisk(name: string): boolean {
     return this.tools.get(name)?.shellRisk === true;
   }
 
-  /** Execute a safe (non-confirmable) tool; returns JSON-stringified observation. */
+  /** 执行安全工具，返回 JSON 字符串形式的观测结果 */
   async executeSafe(
     name: string,
     cwd: string,
@@ -85,7 +97,7 @@ export class ToolRegistry {
   ): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool?.execute) {
-      // update_plan is special: it lives in the agent
+      // update_plan 无 execute，由 Agent 通过 setUpdatePlan 注入
       if (name === 'update_plan' && this.updatePlanFn) {
         return this.updatePlanFn(args);
       }
@@ -94,7 +106,7 @@ export class ToolRegistry {
     return tool.execute({ cwd, signal }, args);
   }
 
-  /** Execute a confirmed tool (after user approval). */
+  /** 用户批准后执行需确认工具 */
   async executeConfirmed(name: string, cwd: string, args: Record<string, unknown>): Promise<ConfirmedToolResult> {
     const tool = this.tools.get(name);
     if (!tool?.executeConfirmed) {
@@ -103,7 +115,7 @@ export class ToolRegistry {
     return tool.executeConfirmed(cwd, args);
   }
 
-  /** Generate a preview string for the confirmation UI. */
+  /** 生成确认 UI 中展示的预览文本 */
   async preview(name: string, cwd: string, args: Record<string, unknown>): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool?.preview) return `Execute ${name}`;
@@ -111,12 +123,16 @@ export class ToolRegistry {
   }
 }
 
-// ── Default registry factory ───────────────────────────────────
+// ── 默认注册表工厂 ───────────────────────────────────────────
 
+/**
+ * 创建并填充内置工具注册表：
+ * 安全工具（读/搜/列/git/网页/plan）与需确认工具（写/替换/编辑/补丁/shell）。
+ */
 export function createDefaultRegistry(): ToolRegistry {
   const r = new ToolRegistry();
 
-  // ── Safe tools ────────────────────────────────────────────
+  // ── 安全工具（无需确认）────────────────────────────────
 
   r.register({
     definition: {
@@ -221,7 +237,7 @@ export function createDefaultRegistry(): ToolRegistry {
         required: ['items']
       }
     }
-    // No execute handler — dispatched via onUpdatePlan callback
+    // 无 execute，由 Agent 的 setUpdatePlan / onUpdatePlan 分发
   });
 
   r.register({
@@ -264,7 +280,7 @@ export function createDefaultRegistry(): ToolRegistry {
     }
   });
 
-  // ── Confirmed tools ───────────────────────────────────────
+  // ── 需确认工具（写盘 / shell 等）────────────────────────
 
   r.register({
     definition: {
@@ -455,7 +471,7 @@ export function createDefaultRegistry(): ToolRegistry {
   return r;
 }
 
-// ── Shared preview helpers ────────────────────────────────────
+// ── 确认预览用的格式化辅助 ────────────────────────────────────
 
 function fmtPath(p: string): string {
   return style.cyan(p);

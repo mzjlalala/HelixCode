@@ -1,5 +1,10 @@
+/**
+ * 补丁工具：通过 git apply 应用统一 diff，并校验补丁路径不逃出项目根目录。
+ */
+
 import { spawn } from 'node:child_process';
 
+/** 先 git apply --check，通过后再应用统一 diff */
 export async function applyPatchTool(
   cwd: string,
   args: { patch?: unknown }
@@ -12,6 +17,7 @@ export async function applyPatchTool(
     return { ok: false, error: `Patch path is outside the project: ${unsafePath}` };
   }
 
+  // 干跑校验，避免应用半截失败
   const check = await runGitApply(cwd, args.patch, ['apply', '--check', '--whitespace=nowarn', '-']);
   if (!check.ok) return check;
 
@@ -51,6 +57,7 @@ function runGitApply(
   });
 }
 
+/** 检查补丁头中的路径是否指向项目外或含 .. */
 function findUnsafePatchPath(patch: string): string | null {
   for (const line of patch.split(/\r?\n/)) {
     const paths = patchHeaderPaths(line);

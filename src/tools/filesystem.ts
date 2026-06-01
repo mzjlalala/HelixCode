@@ -1,3 +1,8 @@
+/**
+ * 文件系统工具：读/写/替换/按行编辑、列举与搜索项目内文件。
+ * 所有路径均限制在工作区根目录内，防止越界访问。
+ */
+
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,10 +17,12 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/** 单文件读/写类工具的通用结果 */
 export type FileToolResult =
   | { ok: true; content: string }
   | { ok: false; error: string };
 
+/** 单次搜索命中：路径、行号、匹配行及可选上下文 */
 export interface SearchMatch {
   path: string;
   line: number;
@@ -28,6 +35,7 @@ export type SearchToolResult =
   | { ok: true; matches: SearchMatch[] }
   | { ok: false; error: string };
 
+/** 将相对路径解析为绝对路径，并拒绝逃出项目根目录 */
 function resolveInsideProject(cwd: string, inputPath: string): FileToolResult {
   const root = resolve(cwd);
   const target = resolve(root, inputPath);
@@ -40,6 +48,7 @@ function resolveInsideProject(cwd: string, inputPath: string): FileToolResult {
   return { ok: true, content: target };
 }
 
+/** 读取项目内文件，可选按 1-based 行号区间截取 */
 export async function readFileTool(
   cwd: string,
   args: { path?: unknown; startLine?: unknown; endLine?: unknown },
@@ -63,6 +72,7 @@ export async function readFileTool(
   }
 }
 
+/** 写入文件（自动创建父目录） */
 export async function writeFileTool(
   cwd: string,
   args: { path?: unknown; content?: unknown }
@@ -86,6 +96,7 @@ export async function writeFileTool(
   }
 }
 
+/** 精确文本替换；多处匹配时需 replaceAll=true */
 export async function replaceInFileTool(
   cwd: string,
   args: { path?: unknown; oldText?: unknown; newText?: unknown; replaceAll?: unknown }
@@ -122,6 +133,7 @@ export async function replaceInFileTool(
   return { ok: true, path: args.path, replacements: args.replaceAll === true ? matches : 1 };
 }
 
+/** 按 inclusive 行号区间替换为多行内容 */
 export async function editFileTool(
   cwd: string,
   args: { path?: unknown; startLine?: unknown; endLine?: unknown; content?: unknown }
@@ -161,6 +173,7 @@ export async function editFileTool(
   if (!written.ok) return written;
   return { ok: true, path: args.path, linesChanged: endLine - startLine + 1 };
 }
+/** 递归遍历项目文件，跳过 IGNORED_DIRS 中的目录 */
 async function walk(cwd: string, dir = '.', signal?: AbortSignal): Promise<string[]> {
   if (signal?.aborted) return [];
   const entries = await readdir(resolve(cwd, dir), { withFileTypes: true });
@@ -194,6 +207,7 @@ async function isWithinSizeLimit(cwd: string, relPath: string): Promise<boolean>
   }
 }
 
+/** 列出项目内所有相对路径文件（已排序） */
 export async function listFilesTool(cwd: string, signal?: AbortSignal): Promise<{ ok: true; files: string[] } | { ok: false; error: string }> {
   try {
     return { ok: true, files: (await walk(cwd, '.', signal)).sort() };
@@ -202,6 +216,7 @@ export async function listFilesTool(cwd: string, signal?: AbortSignal): Promise<
   }
 }
 
+/** 在文件内容中搜索；优先 ripgrep，不可用时回退内存扫描 */
 export async function searchFilesTool(
   cwd: string,
   args: {
@@ -235,6 +250,7 @@ export async function searchFilesTool(
   const rgResult = await searchWithRipgrep(cwd, searchOpts);
   if (rgResult) return rgResult;
 
+  // rg 未安装或失败时，遍历文件列表做子串匹配
   return searchFilesInMemory(cwd, searchOpts);
 }
 
@@ -279,7 +295,7 @@ async function searchWithRipgrep(
   } catch (error) {
     const err = error as { code?: number | string; killed?: boolean; stdout?: string };
     if (err.code === 1) {
-      // rg exit 1 = no matches
+      // rg 退出码 1 表示无匹配
       return { ok: true, matches: [] };
     }
     if (err.stdout && typeof err.stdout === 'string') {
@@ -333,7 +349,7 @@ function parseRipgrepJson(
         pendingContext.set(path, bucket);
       }
     } catch {
-      // skip malformed rg json line
+      // 跳过无法解析的 rg JSON 行
     }
   }
 

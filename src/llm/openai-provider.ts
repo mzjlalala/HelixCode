@@ -1,15 +1,15 @@
-﻿// ── OpenAI-compatible fetch-based provider ──────────────────
-//
-// All requests go through fetch() to eliminate the duplicate
-// SSE-parsing code paths that existed between the SDK-based
-// and fetch-based implementations. The optional `_client`
-// constructor parameter is kept for test injection compat
-// but is silently ignored.
+﻿/**
+ * OpenAI 兼容 fetch Provider
+ *
+ * 所有请求统一走 fetch()，消除 SDK 与 fetch 两套 SSE 解析路径的重复。
+ * 支持非流式与流式 chat/completions，流式响应由 StreamAccumulator 增量累积。
+ * 构造函数中的 `_client` 参数保留用于测试注入兼容，实际始终使用 fetch。
+ */
 
 import type { HelixConfig } from '../core/config.js';
 import type { ChatMessage, ChatProvider, ChatResult, ToolCall, ToolDefinition } from './types.js';
 
-// ── Shared delta shape consumed by streaming ────────────────
+// ── 流式 delta 结构（SSE 解析后消费） ────────────────────────
 
 interface StreamDelta {
   content?: string | null;
@@ -22,11 +22,16 @@ interface StreamDelta {
   }>;
 }
 
-// ── Stream accumulator (shared by all streaming paths) ──────
+// ── 流式累积器（所有流式路径共享） ────────────────────────────
 
+/**
+ * 累积 SSE 流中的 content、reasoning 与 tool_calls 分片。
+ * tool_calls 按 index 合并 arguments 字符串，finalize 时解析为完整 ToolCall[]。
+ */
 class StreamAccumulator {
   fullContent = '';
   private hasToolCalls = false;
+  /** 按 stream index 合并同一 tool_call 的分片（id/name/arguments 可能分多 chunk 到达） */
   private calls = new Map<number, { id: string; name: string; args: string }>();
 
   addContent(token: string, onToken: (t: string) => void): void {
@@ -38,6 +43,7 @@ class StreamAccumulator {
     onReasoning?.(text);
   }
 
+  /** 处理单个 SSE delta，分发到 content / reasoning / tool_calls 分支。 */
   addDelta(delta: StreamDelta, onToken: (t: string) => void, onReasoning?: (t: string) => void): void {
     if (delta.reasoning_content) {
       this.addReasoning(delta.reasoning_content, onReasoning);
@@ -51,12 +57,14 @@ class StreamAccumulator {
         const existing = this.calls.get(tc.index) ?? { id: '', name: '', args: '' };
         if (tc.id) existing.id = tc.id;
         if (tc.function?.name) existing.name = tc.function.name;
+        // arguments 在流式响应中可能分多次追加
         if (tc.function?.arguments) existing.args += tc.function.arguments;
         this.calls.set(tc.index, existing);
       }
     }
   }
 
+  /** 流结束后组装最终 ChatResult：优先 tool_calls，否则返回文本。 */
   finalize(): ChatResult {
     if (this.hasToolCalls && this.calls.size > 0) {
       const toolCalls: ToolCall[] = [...this.calls.entries()]
@@ -75,7 +83,7 @@ class StreamAccumulator {
   }
 }
 
-// ── OpenAI tool formatting ──────────────────────────────────
+// ── OpenAI 工具格式转换 ──────────────────────────────────────
 
 function buildOpenAITools(tools: ToolDefinition[]): Array<{
   type: 'function';
@@ -87,6 +95,7 @@ function buildOpenAITools(tools: ToolDefinition[]): Array<{
   }));
 }
 
+/** 构建 chat/completions 请求体；DeepSeek 额外启用 thinking。 */
 function buildRequestBody(
   config: HelixConfig,
   runtime: { model: string },
@@ -110,6 +119,7 @@ function buildRequestBody(
   return body;
 }
 
+/** 将内部 ChatMessage 序列化为 OpenAI API 消息格式。 */
 function serializeMessage(msg: ChatMessage): Record<string, unknown> {
   const m: Record<string, unknown> = { role: msg.role, content: msg.content ?? null };
 
@@ -133,7 +143,7 @@ function serializeMessage(msg: ChatMessage): Record<string, unknown> {
   return m;
 }
 
-// ── Shared error message builder ────────────────────────────
+// ── 共享错误信息构建 ──────────────────────────────────────────
 
 function buildErrorMessage(config: HelixConfig, runtime: { model: string }, detail: string): string {
   return [
@@ -144,8 +154,9 @@ function buildErrorMessage(config: HelixConfig, runtime: { model: string }, deta
   ].join('\n');
 }
 
-// ── Shared non-streaming response parser ────────────────────
+// ── 非流式响应解析 ────────────────────────────────────────────
 
+/** 解析 chat/completions 非流式 JSON 响应为 ChatResult。 */
 function parseChatResponse(
   json: unknown
 ): ChatResult {
@@ -173,7 +184,7 @@ function parseChatResponse(
       .filter((tc) => !tc.type || tc.type === 'function')
       .map((tc) => {
         let parsed: Record<string, unknown> = {};
-        try { parsed = JSON.parse(tc.function.arguments); } catch { /* use empty */ }
+        try { parsed = JSON.parse(tc.function.arguments); } catch { /* 解析失败时使用空对象 */ }
         return { id: tc.id, name: tc.function.name, arguments: parsed };
       });
     if (calls.length > 0) {
@@ -184,7 +195,7 @@ function parseChatResponse(
   return { type: 'text', content: choice.content ?? '', reasoning_content };
 }
 
-// ── Non-streaming: fetch-based ──────────────────────────────
+// ── 非流式：fetch 实现 ────────────────────────────────────────
 
 async function fetchComplete(
   config: HelixConfig,
@@ -217,7 +228,7 @@ async function fetchComplete(
   }
 }
 
-// ── Streaming: fetch-based (uses shared StreamAccumulator) ──
+// ── 流式：fetch + StreamAccumulator ───────────────────────────
 
 async function fetchCompleteStream(
   config: HelixConfig,
@@ -260,6 +271,7 @@ async function fetchCompleteStream(
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
+        // 保留未完整的一行到下次 read
         buffer = lines.pop() ?? '';
 
         for (const line of lines) {
@@ -273,7 +285,7 @@ async function fetchCompleteStream(
             const delta = chunk.choices?.[0]?.delta;
             if (delta) acc.addDelta(delta, onToken, onReasoning);
           } catch {
-            // skip malformed JSON lines
+            // 跳过格式错误的 SSE 行
           }
         }
       }
@@ -292,7 +304,7 @@ async function fetchCompleteStream(
   }
 }
 
-// ── OpenAIChatProvider class ────────────────────────────────
+// ── OpenAIChatProvider 类 ─────────────────────────────────────
 
 export class OpenAIChatProvider implements ChatProvider {
   private readonly runtime: { model: string };
@@ -300,7 +312,7 @@ export class OpenAIChatProvider implements ChatProvider {
   constructor(
     private readonly config: HelixConfig,
     runtime?: { model: string },
-    _client?: unknown   // kept for test-injection backward compat; always uses fetch
+    _client?: unknown   // 保留用于测试注入向后兼容；实际始终使用 fetch
   ) {
     this.runtime = runtime ?? { model: config.model };
   }
@@ -327,7 +339,7 @@ export class OpenAIChatProvider implements ChatProvider {
   }
 }
 
-// ── Message serialization (exported for external consumers) ─
+// ── 消息序列化（供外部消费者导出） ─────────────────────────────
 
 export function toOpenAIMessages(messages: ChatMessage[]): Record<string, unknown>[] {
   return messages.map((msg): Record<string, unknown> => {

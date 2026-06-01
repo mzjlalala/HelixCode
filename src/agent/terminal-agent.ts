@@ -1,4 +1,12 @@
-﻿import { classifyShellCommand } from '../tools/shell.js';
+﻿/**
+ * 终端 Agent 核心循环
+ *
+ * 管理对话历史、工具调用与计划状态，驱动 LLM 多轮交互：
+ * - completeTurn：单轮完整流程（LLM → 工具 → 确认/终局）
+ * - handleToolCallsBatch：原生 tool_calls 批处理，安全工具并行执行
+ * - 遗留 JSON 工具协议由 tool-request 模块解析作为兜底
+ */
+import { classifyShellCommand } from '../tools/shell.js';
 import { createDefaultRegistry, ToolRegistry } from '../tools/registry.js';
 import type { ChatMessage, ChatProvider, ToolCall } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
@@ -34,8 +42,9 @@ export interface PlanItem {
   status: PlanItemStatus;
 }
 
-// ── Timeline helper ──────────────────────────────────────────
+// ── 耗时统计辅助类 ──────────────────────────────────────────
 
+/** 按标签累计各阶段/工具调用耗时，供 turn 结束时输出 timeline。 */
 class Timeline {
   private entries = new Map<string, { totalMs: number; calls: number }>();
 
@@ -57,7 +66,7 @@ class Timeline {
   }
 }
 
-// ── TerminalAgent ────────────────────────────────────────────
+// ── TerminalAgent 主类 ───────────────────────────────────────
 
 export class TerminalAgent {
   private readonly history: ChatMessage[] = [];
@@ -89,11 +98,13 @@ export class TerminalAgent {
     this.registry.setUpdatePlan((args) => JSON.stringify(this.updatePlan(args)));
   }
 
+  /** 处理用户输入，开启新一轮 Agent 循环。 */
   async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
     this.timeline.reset();
     return this.completeTurn([{ role: 'user', content: input }], options?.signal);
   }
 
+  /** 用户确认危险/写操作工具后，将执行结果作为 tool 消息继续本轮。 */
   async continueAfterConfirmation(
     confirmation: Extract<AgentTurnResult, { type: 'confirmation' }>,
     result: ConfirmedToolResult
@@ -111,6 +122,7 @@ export class TerminalAgent {
     ]);
   }
 
+  /** 用户跳过确认时，将拒绝结果写入历史，避免 LLM 重复请求同一操作。 */
   recordSkippedConfirmation(
     confirmation: Extract<AgentTurnResult, { type: 'confirmation' }>
   ): void {
@@ -135,16 +147,20 @@ export class TerminalAgent {
     return this.history.length;
   }
 
-  /** Get a copy of all history messages (for persistence) */
+  /** 获取历史消息副本（用于持久化）。 */
   getHistory(): ChatMessage[] {
     return [...this.history];
   }
 
+  /**
+   * 压缩内存历史，保留最近 keepMessages 条。
+   * 裁剪后若开头残留孤立的 tool 消息（对应 assistant 的 tool_calls 已被裁掉），则一并移除。
+   */
   compactHistory(keepMessages = DEFAULT_COMPACT_KEEP_MESSAGES): number {
     const keep = Math.max(0, Math.floor(keepMessages));
     if (this.history.length > keep) {
       this.history.splice(0, this.history.length - keep);
-      // Remove orphaned tool messages at the start (their parent tool_calls was stripped)
+      // 移除开头孤立的 tool 消息（其父级 tool_calls 已被裁剪）
       while (this.history.length > 0 && this.history[0]?.role === 'tool') {
         this.history.shift();
       }
@@ -152,9 +168,8 @@ export class TerminalAgent {
     return this.history.length;
   }
 
-  /** Load persisted history messages into agent history */
+  /** 从持久化存储恢复历史；system 消息由每轮动态生成，不加载。 */
   loadHistory(messages: ChatMessage[]): void {
-    // Keep all messages except system (we generate system prompt fresh each turn)
     const filtered = messages.filter((m) => m.role !== 'system');
     if (filtered.length > 0) {
       this.history.push(...filtered);
@@ -165,13 +180,19 @@ export class TerminalAgent {
     return this.plan.map((item) => ({ ...item }));
   }
 
-  /** Tool registry used by this agent (share with confirmation UI). */
+  /** 供确认 UI 共享的工具注册表（与 Agent 使用同一实例）。 */
   getToolRegistry(): ToolRegistry {
     return this.registry;
   }
 
-  // ── Private run loop ──────────────────────────────────────
+  // ── 私有运行循环 ──────────────────────────────────────────
 
+  /**
+   * 完成一轮 Agent 交互的核心循环。
+   *
+   * 流程：组装 messages → LLM 响应 → 原生 tool_calls / 文本 / 遗留 JSON 协议分支 →
+   * 工具执行或返回 confirmation / final，最多 maxToolRounds 轮。
+   */
   private async completeTurn(turnMessages: ChatMessage[], signal?: AbortSignal): Promise<AgentTurnResult> {
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
@@ -185,12 +206,12 @@ export class TerminalAgent {
 
       this.timeline.record('llm', performance.now() - llmStart);
 
-      // Non-streaming path: emit reasoning at once (streaming path emits via SSE onReasoning)
+      // 非流式路径：一次性输出 reasoning（流式路径通过 SSE onReasoning 逐块推送）
       if (!this.options.onToken && result.reasoning_content && this.options.onReasoning) {
         this.options.onReasoning(result.reasoning_content);
       }
 
-      // Native tool calls from the provider
+      // Provider 返回的原生 tool_calls
       if (result.type === 'tool_calls') {
         const batchResult = await this.handleToolCallsBatch(
           result.calls,
@@ -204,7 +225,7 @@ export class TerminalAgent {
         continue;
       }
 
-      // Text response — check for legacy JSON protocol fallback
+      // 纯文本响应 — 尝试解析遗留 JSON 工具协议
       const request = parseToolRequest(result.content);
       if (!request) {
         turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
@@ -212,7 +233,7 @@ export class TerminalAgent {
         return { type: 'final', message: result.content, timeline: this.timeline.snapshot() };
       }
 
-      // Legacy JSON protocol fallback (for models that don't support native tool calling)
+      // 遗留 JSON 协议兜底（不支持原生 function calling 的模型）
       turnMessages.push({ role: 'assistant', content: result.content, reasoning_content: result.reasoning_content ?? null });
 
       if (this.registry.isConfirmed(request.tool)) {
@@ -245,6 +266,7 @@ export class TerminalAgent {
       }
       const observation = await this.executeTool({ id: '', name: request.tool, arguments: request.args ?? {} }, signal);
       turnMessages.push({ role: 'tool', content: observation, tool_call_id: '' });
+      // 刷新 messages 以包含最新 tool 观测，进入下一轮 LLM
       messages.splice(
         0,
         messages.length,
@@ -258,7 +280,12 @@ export class TerminalAgent {
     return { type: 'final', message: 'HelixCode stopped after too many tool rounds.', timeline: this.timeline.snapshot() };
   }
 
-  /** Process a batch of native tool_calls: parallel safe tools, then confirm/block. */
+  /**
+   * 处理一批原生 tool_calls。
+   *
+   * 策略：从左到右扫描，遇到需确认或 shell 风险工具前，先将前缀中的「安全工具」并行执行；
+   * 遇 block 直接终局，遇 confirm 返回 confirmation，全部安全则返回 null 继续 LLM 循环。
+   */
   private async handleToolCallsBatch(
     calls: ToolCall[],
     assistantContent: string | null,
@@ -271,8 +298,10 @@ export class TerminalAgent {
     let stopReason: 'confirm' | 'block' | null = null;
     let blockMessage: string | undefined;
 
+    // 扫描：确定首个需暂停的位置（确认 / 拦截）
     for (let idx = 0; idx < calls.length; idx += 1) {
       const call = calls[idx]!;
+      // 每个 tool_call 单独一条 assistant 消息（与 OpenAI 多 call 格式一致）
       turnMessages.push({
         role: 'assistant',
         content: assistantContent,
@@ -301,6 +330,7 @@ export class TerminalAgent {
       }
     }
 
+    // stopReason 为 null 表示整批均可并行执行
     const safeCalls = calls.slice(0, stopReason === null ? calls.length : stopIndex);
 
     if (signal?.aborted && safeCalls.length > 0) {
@@ -308,6 +338,7 @@ export class TerminalAgent {
       return { type: 'final', message: 'Interrupted.', timeline: this.timeline.snapshot() };
     }
 
+    // 安全工具并行执行
     if (safeCalls.length > 0) {
       const observations = await Promise.all(
         safeCalls.map((call) => this.executeTool(call, signal))
@@ -345,6 +376,7 @@ export class TerminalAgent {
       };
     }
 
+    // 全部安全工具已执行，刷新 messages 继续下一轮 LLM
     messages.splice(
       0,
       messages.length,
@@ -355,6 +387,7 @@ export class TerminalAgent {
     return null;
   }
 
+  /** 调用 LLM；有 onToken 时走流式 completeStream，否则非流式 complete。 */
   private async getLLMResponse(
     messages: ChatMessage[],
     signal?: AbortSignal
@@ -373,7 +406,7 @@ export class TerminalAgent {
     return this.options.provider.complete(messages, definitions);
   }
 
-  /** Dispatch a safe tool call through the registry. */
+  /** 通过 registry 分发安全工具调用，并记录耗时。 */
   private async executeTool(call: ToolCall, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) return JSON.stringify({ ok: false, error: 'Interrupted.' });
 
@@ -386,6 +419,7 @@ export class TerminalAgent {
     }
   }
 
+  /** update_plan 工具回调：校验 items 并持久化到 .helix/plan.json。 */
   private updatePlan(args: Record<string, unknown>): { ok: true; plan: PlanItem[] } | { ok: false; error: string } {
     if (!Array.isArray(args.items)) {
       return { ok: false, error: 'update_plan requires an items array.' };
@@ -402,6 +436,7 @@ export class TerminalAgent {
     return { ok: true, plan: this.currentPlan() };
   }
 
+  /** 追加历史并在超出 maxHistoryMessages 时从头部裁剪。 */
   private appendHistory(messages: ChatMessage[]): void {
     this.history.push(...messages);
     if (this.history.length > this.maxHistoryMessages) {
@@ -410,6 +445,7 @@ export class TerminalAgent {
   }
 }
 
+/** 为确认 UI 生成工具操作摘要文案。 */
 function toolSummary(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case 'write_file': return `Write file: ${String(args.path ?? '')}`;
@@ -421,6 +457,7 @@ function toolSummary(name: string, args: Record<string, unknown>): string {
   }
 }
 
+/** 构建 Agent 系统提示，包含行为准则、工具说明与项目指令。 */
 export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): string {
   const lines = [
     'You are HelixCode, a versatile AI assistant running in the terminal.',

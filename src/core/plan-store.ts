@@ -1,3 +1,7 @@
+/**
+ * 任务计划持久化
+ * Agent 通过 update_plan 工具维护的多步骤计划，写入 .helix/plan.json
+ */
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import type { PlanItem } from '../agent/terminal-agent.js';
@@ -10,6 +14,7 @@ export interface SavedPlan {
   items: PlanItem[];
 }
 
+/** 启动时恢复计划；无效数据返回空数组 */
 export async function loadPlan(cwd: string): Promise<PlanItem[]> {
   try {
     const content = await readFile(resolve(cwd, PLAN_FILE), 'utf8');
@@ -23,6 +28,7 @@ export async function loadPlan(cwd: string): Promise<PlanItem[]> {
   }
 }
 
+/** 计划变更后写入磁盘 */
 export async function savePlan(cwd: string, items: PlanItem[]): Promise<void> {
   const target = resolve(cwd, PLAN_FILE);
   await mkdir(dirname(target), { recursive: true });

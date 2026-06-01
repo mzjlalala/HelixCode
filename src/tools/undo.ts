@@ -1,3 +1,7 @@
+/**
+ * 撤销栈：在写文件/替换/编辑/打补丁前备份，支持会话间持久化与 undo 恢复。
+ */
+
 import { copyFile, mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -16,7 +20,7 @@ function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
-/** Extract affected file paths from a unified diff patch header */
+/** 从统一 diff 的 diff --git 行提取受影响的相对路径 */
 export function affectedPatchFiles(patch: string): string[] {
   const files = new Set<string>();
   for (const line of patch.split(/\r?\n/)) {
@@ -29,7 +33,7 @@ export function affectedPatchFiles(patch: string): string[] {
   return [...files];
 }
 
-/** Load persisted undo stack from disk (call once at session start). */
+/** 从磁盘加载持久化的撤销栈（会话开始时调用一次） */
 export async function loadUndoStack(cwd: string): Promise<void> {
   try {
     const content = await readFile(resolve(cwd, STACK_FILE), 'utf8');
@@ -37,7 +41,7 @@ export async function loadUndoStack(cwd: string): Promise<void> {
     if (!Array.isArray(parsed)) return;
     undoStack.splice(0, undoStack.length, ...parsed.filter(isUndoEntry));
   } catch {
-    // No stack yet — start empty
+    // 尚无栈文件 — 保持空栈
   }
 }
 
@@ -47,7 +51,10 @@ async function persistUndoStack(cwd: string): Promise<void> {
   await writeFile(target, JSON.stringify(undoStack, null, 2) + '\n', 'utf8');
 }
 
-/** Create a backup of a file before it's modified. Returns the backup path, or null if the file doesn't exist (new file). */
+/**
+ * 修改前备份文件；新文件不存在时返回 null。
+ * 备份写入 .helix/undo/ 并压入栈。
+ */
 export async function backupFile(cwd: string, path: string, tool: string): Promise<UndoEntry | null> {
   const target = resolve(cwd, path);
   try {
@@ -69,12 +76,12 @@ export async function backupFile(cwd: string, path: string, tool: string): Promi
   return entry;
 }
 
-/** Get the most recent undo entry, or null */
+/** 查看栈顶撤销项，不弹出 */
 export function peekUndo(): UndoEntry | null {
   return undoStack.length > 0 ? (undoStack[undoStack.length - 1] ?? null) : null;
 }
 
-/** Restore the most recent backup and pop the stack */
+/** 用最近备份覆盖原文件并弹出栈顶；失败时重新压栈 */
 export async function undoLast(cwd: string): Promise<{ ok: true; entry: UndoEntry } | { ok: false; error: string }> {
   const entry = undoStack.pop();
   if (!entry) return { ok: false, error: 'Nothing to undo.' };
@@ -91,7 +98,7 @@ export async function undoLast(cwd: string): Promise<{ ok: true; entry: UndoEntr
   }
 }
 
-/** Get the undo stack for display */
+/** 返回撤销栈副本（供 UI 展示） */
 export function getUndoStack(): UndoEntry[] {
   return [...undoStack];
 }

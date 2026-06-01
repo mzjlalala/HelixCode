@@ -1,4 +1,11 @@
 #!/usr/bin/env node
+/**
+ * HelixCode CLI 入口模块
+ *
+ * 负责解析命令行参数，启动 REPL 交互循环或一次性（one-shot）任务执行。
+ * 核心流程包括：运行时上下文创建、Agent 流式输出、工具确认循环、
+ * 权限模式切换、斜杠命令分发与会话历史持久化。
+ */
 import { Command } from 'commander';
 import { createInterface } from 'node:readline/promises';
 import { emitKeypressEvents } from 'node:readline';
@@ -22,30 +29,32 @@ import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
 import { undoLast, loadUndoStack } from '../tools/undo.js';
 
-// Windows console output helper.
-// On Windows TTY: use process.stdout.write() → WriteConsoleW (direct UTF-16, no codepage issues).
-// Other platforms / non-TTY: use writeSync(1, ...) for reliable raw-bytes flushing.
+/**
+ * 跨平台控制台输出辅助
+ * Windows TTY：process.stdout.write → WriteConsoleW（UTF-16，避免代码页问题）
+ * 其他平台或非 TTY：writeSync(1, ...) 保证原始字节可靠刷新
+ */
 const writeOutput = process.platform === 'win32' && process.stdout.isTTY
   ? (text: string) => { process.stdout.write(text); }
   : (text: string) => writeSync(1, text);
 
-// On Windows, force UTF-8 console code page for Unicode display.
-// Some terminals (Windows Terminal, ConEmu) may not inherit the code page
-// from the parent process, so we set it at startup.
+// Windows 启动时强制 UTF-8 代码页，确保 Unicode 正常显示
+// 部分终端（Windows Terminal、ConEmu）可能未继承父进程代码页
 if (process.platform === 'win32') {
   try {
     execSync('chcp.com 65001 > nul', { windowsHide: true, timeout: 3000 });
-    // Also set stream encoding to ensure Node.js pipes use UTF-8
+    // 同步设置流编码，保证 Node 管道使用 UTF-8
     process.stdout.setDefaultEncoding('utf-8');
     process.stderr.setDefaultEncoding('utf-8');
-  } catch { /* best-effort — terminal may already be UTF-8 */ }
+  } catch { /* 尽力而为 — 终端可能已是 UTF-8 */ }
 }
 
+/** REPL 提示符反色背景与前景恢复用的 ANSI 序列 */
 const INV_BG = '\x1b[48;5;236m\x1b[38;5;255m';
 const FG_RESTORE = '\x1b[38;5;255m';
 const RESET = '\x1b[0m';
 
-// Top-level error boundary
+// 顶层未捕获错误边界，避免静默崩溃
 process.on('unhandledRejection', (reason) => {
   output.write(`\n${style.error(`${SYMBOL.error} Unhandled error: ${reason instanceof Error ? reason.message : String(reason)}`)}\n`);
 });
@@ -73,11 +82,13 @@ program
     cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string; model?: string; mode?: string;
     maxToolRounds?: string;
   }) => {
+    // --doctor：输出诊断信息后退出
     if (options.doctor) {
       output.write(`${await createDoctorOutput(options.cwd)}\n`);
       process.exit(process.exitCode || 0);
     }
     const prompt = joinPromptArgs(promptParts);
+    // 有 prompt 参数：一次性模式；否则进入 REPL
     if (prompt) {
       await runOnce(options.cwd, prompt, {
         autoConfirm: options.yes === true,
@@ -92,6 +103,7 @@ program
     });
   });
 
+/** REPL 会话级状态（跨多轮输入共享） */
 let currentAbort: AbortController | null = null;
 let currentMode: PermissionMode = 'default';
 let streamedThisTurn = false;
@@ -102,6 +114,7 @@ let timerInterval: ReturnType<typeof setInterval> | null = null;
 let timerFrame = 0;
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/** 启动 Agent 等待期间的旋转计时器（200ms 刷新） */
 function startTimer(): void {
   timerFrame = 0;
   const update = () => {
@@ -113,6 +126,7 @@ function startTimer(): void {
   timerInterval = setInterval(update, 200);
 }
 
+/** 停止计时器（不清理当前行） */
 function stopTimer(): void {
   if (timerInterval) {
     clearInterval(timerInterval);
@@ -120,16 +134,19 @@ function stopTimer(): void {
   }
 }
 
+/** 停止计时器并擦除 spinner 行，便于流式内容紧接输出 */
 function stopTimerAndFreeze(): void {
   if (timerInterval) {
     clearInterval(timerInterval);
     timerInterval = null;
-    // Clear the animated spinner line so streaming content follows cleanly
+    // 清空动画行，避免与后续流式文本重叠
     output.write('\r' + ' '.repeat(30) + '\r');
   }
 }
 
-// Strip Markdown formatting for non-streamed output
+/**
+ * 移除非流式输出中的 Markdown 格式，适配纯终端显示
+ */
 function stripMarkdown(text: string): string {
   return text
     .replace(/^#{1,6}\s+/gm, '')
@@ -145,6 +162,12 @@ function stripMarkdown(text: string): string {
 }
 
 
+/**
+ * 一次性执行模式：运行单条 prompt，处理确认循环后输出 Git 摘要
+ * @param cwd 工作目录
+ * @param prompt 用户任务描述
+ * @param options autoConfirm、maxTurns、model、maxToolRounds 等
+ */
 export async function runOnce(
   cwd: string,
   prompt: string,
@@ -166,10 +189,14 @@ export async function runOnce(
     autoConfirm: options.autoConfirm === true,
     remainingTurns: options.maxTurns ?? 10
   });
-  stopTimer(); // safety cleanup
+  stopTimer(); // 兜底清理
   output.write(`${style.info(await createOneShotGitSummary(context.config.cwd))}\n`);
 }
 
+/**
+ * 交互式 REPL 主循环
+ * 支持：历史恢复、斜杠命令、Shift+Tab 切换权限模式、Ctrl+C 中断/退出
+ */
 export async function runRepl(
   cwd: string,
   modelOverride?: string,
@@ -180,10 +207,10 @@ export async function runRepl(
   if (!context) return;
   const { config, projectInstructions, runtime, agent, session } = context;
 
-  // Load initial permission mode: CLI --mode > .helix/config.json > default
+  // 权限模式优先级：CLI --mode > .helix/config.json > default
   currentMode = modeOverride ?? (await loadPermissionMode(config.cwd)) ?? 'default';
 
-  // Load persisted history
+  // 从磁盘恢复会话历史
   const savedMessages = await loadHistory(config.cwd);
   if (savedMessages.length > 0) {
     agent.loadHistory(savedMessages);
@@ -195,6 +222,7 @@ export async function runRepl(
     output.write(`Loaded project instructions: ${projectInstructions.map((item) => item.path).join(', ')}\n`);
   }
 
+  // 非 TTY（管道输入）：逐行读取 stdin，不启动 readline 交互
   if (!input.isTTY) {
     const content = await readAllStdin();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
@@ -207,13 +235,14 @@ export async function runRepl(
     return;
   }
 
+  /** Tab 补全：斜杠命令前缀匹配 */
   const completer = (line: string): CompleterResult => {
     if (!line.trimStart().startsWith('/')) return [[], line];
     const candidates = completeSlashCommand(line);
     return [candidates.length ? candidates : SLASH_COMMANDS.map((c) => c.name), line];
   };
 
-  // Prep listener BEFORE createInterface so our handler fires before readline's
+  // 须在 createInterface 之前注册 keypress，确保先于 readline 收到 Shift+Tab
   let rl: ReturnType<typeof createInterface>;
   emitKeypressEvents(input);
   input.prependListener('keypress', (_str: string, key: { name?: string; shift?: boolean }) => {
@@ -221,12 +250,12 @@ export async function runRepl(
       currentMode = cycleMode(currentMode);
       savePermissionMode(config.cwd, currentMode).catch(() => {});
 
-      // Update readline's prompt and refresh line
-      // Then fix cursor position since readline incorrectly counts escape sequences
+      // 更新 readline 提示符并刷新当前行
+      // readline 会把 ANSI 转义序列计入长度，需手动修正光标位置
       if (rl) {
         rl.setPrompt(`${INV_BG}${formatModeTag(currentMode, FG_RESTORE)} > `);
         rl.prompt(true);
-        // Correct cursor: prompt = label + " > " (visual), readline counted escape chars
+        // 可见提示符长度 = 模式标签 + " > "
         const visualPromptLen = MODE_LABELS[currentMode].label.length + 3;
         const cursorInLine = (rl as any).cursor ?? 0;
         writeOutput(`\x1b[${visualPromptLen + cursorInLine + 1}G`);
@@ -237,6 +266,7 @@ export async function runRepl(
   rl = createInterface({ input, output, completer });
   let closing = false;
 
+  // 第一次 Ctrl+C 中断当前 Agent；无进行中任务时退出 REPL
   rl.on('SIGINT', () => {
     if (currentAbort) {
       currentAbort.abort();
@@ -251,6 +281,7 @@ export async function runRepl(
     process.exit(0);
   });
 
+  // 主输入循环
   while (!closing) {
     let line: string;
     try {
@@ -272,6 +303,10 @@ export async function runRepl(
   rl.close();
 }
 
+/**
+ * 处理单行用户输入：斜杠命令分支或 Agent 运行分支
+ * @returns true 表示应退出 REPL（如 /exit）
+ */
 async function handleInputLine(
   line: string,
   context: {
@@ -304,7 +339,7 @@ async function handleInputLine(
     if (slash.cycleMode) {
       currentMode = cycleMode(currentMode);
       slash.output = style.dim(`◈ ${MODE_LABELS[currentMode].label}: ${MODE_LABELS[currentMode].desc}`);
-      // Persist mode to config file
+      // 持久化模式到 .helix/config.json
       savePermissionMode(context.config.cwd, currentMode).catch(() => {});
     }
     if (slash.compact) {
@@ -332,6 +367,7 @@ async function handleInputLine(
     return slash.exit;
   }
 
+  // 普通用户消息：启动 Agent，支持 Ctrl+C 中断
   const abort = new AbortController();
   currentAbort = abort;
   streamedThisTurn = false;
@@ -342,6 +378,7 @@ async function handleInputLine(
   try {
     const result = await context.agent.run(line, { signal: abort.signal });
     stopTimerAndFreeze();
+    // 中断后若已有 partial 结果，仍输出时间线
     if (result.type === 'final' && abort.signal.aborted) {
       const partialTotal = performance.now() - turnStartMs;
       const timeline = result.timeline ?? [];
@@ -355,11 +392,16 @@ async function handleInputLine(
     stopTimer();
     if (currentAbort === abort) currentAbort = null;
   }
-  // Auto-save history after each turn
+  // 每轮对话结束后自动保存历史
   saveAgentHistory(context.config.cwd, context.agent, context.session);
   return false;
 }
 
+/**
+ * 处理 Agent 单次 run 的返回结果
+ * - type === 'final'：输出最终文本与时间线
+ * - 否则进入工具确认循环（权限模式 / 交互确认 / one-shot --yes）
+ */
 async function handleAgentResult(
   result: Awaited<ReturnType<TerminalAgent['run']>>,
   context: {
@@ -371,7 +413,7 @@ async function handleAgentResult(
   }
 ): Promise<void> {
   if (result.type === 'final') {
-    // Write response message first
+    // 先输出回复正文
     const message = !streamedThisTurn ? stripMarkdown(result.message) : '';
     if (!streamedThisTurn) {
       const prefix = lastOutput ? '\n' : '';
@@ -380,7 +422,7 @@ async function handleAgentResult(
       output.write('\n');
     }
 
-    // Then timing
+    // 再输出耗时时间线
     const merged = mergeAgentTimeline(result.timeline, cliTimings);
     const totalWallClock = performance.now() - turnStartMs;
     if (merged.length > 0 || cliTimings.length > 0) {
@@ -392,6 +434,7 @@ async function handleAgentResult(
     return;
   }
 
+  // 需确认的工具调用：先换行，再展示工具名与预览
   if (streamedThisTurn || lastOutput) output.write('\n');
   streamedThisTurn = false;
   lastOutput = null;
@@ -400,14 +443,14 @@ async function handleAgentResult(
   const preview = await previewConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
   output.write(`${preview}\n`);
 
-  // Permission mode: plan → auto-skip
+  // plan 模式：只读，自动跳过所有需确认工具
   if (shouldSkip(result.tool, currentMode)) {
     context.agent.recordSkippedConfirmation(result);
     output.write(`${style.dim(`${SYMBOL.info} ${MODE_LABELS[currentMode].label}: skipped ${result.tool}`)}\n`);
     return;
   }
 
-  // Permission mode: auto-approve (auto / acceptEdits)
+  // auto / acceptEdits 模式：按策略自动批准并递归继续 Agent
   if (shouldAutoApprove(result.tool, currentMode)) {
     output.write(`${style.dim(`${MODE_LABELS[currentMode].label}: auto-approved`)}\n`);
     const toolStart = performance.now();
@@ -419,6 +462,7 @@ async function handleAgentResult(
     return;
   }
 
+  // 非交互 one-shot 且未传 --yes：跳过确认
   if (!context.rl && context.autoConfirm !== true) {
     output.write(`${style.dim(`${result.summary}? [y/N]`)} ${style.dim('Command skipped in non-interactive mode.')}\n`);
     context.agent.recordSkippedConfirmation(result);
@@ -431,6 +475,7 @@ async function handleAgentResult(
     return;
   }
 
+  // 非交互 one-shot + --yes：自动确认，受 maxTurns 限制
   if (!context.rl && context.autoConfirm === true) {
     const remainingTurns = context.remainingTurns ?? 10;
     if (remainingTurns <= 0) {
@@ -453,6 +498,7 @@ async function handleAgentResult(
     return;
   }
 
+  // 交互 REPL：询问 Proceed? [y/N]
   const rl = context.rl;
   if (!rl) return;
   const answer = (await rl.question(`${style.dim('Proceed? [y/N]')} `)).trim().toLowerCase();
@@ -466,7 +512,7 @@ async function handleAgentResult(
   } else {
     context.agent.recordSkippedConfirmation(result);
     output.write(`${style.dim('Skipped.')}\n`);
-    // Show partial timeline on skip
+    // 用户拒绝时仍展示已消耗的部分时间线
     const partialTimeline = result.timeline ?? [];
     const partialTotal = performance.now() - turnStartMs;
     if (partialTimeline.length > 0) {
@@ -476,11 +522,13 @@ async function handleAgentResult(
   }
 }
 
+/** 格式化工具确认执行结果（成功/失败着色） */
 function formatConfirmedToolResult(result: ConfirmedToolResult): string {
   if (!result.ok) return `${style.error(`${SYMBOL.error} ${result.error}`)}`;
   return `${style.success(`${SYMBOL.success} ${result.output}`)}`;
 }
 
+/** 合并 Agent 内部时间线与 CLI 侧工具耗时（同 label 累加） */
 function mergeAgentTimeline(agentTimeline: TimingEntry[] | undefined, cliTimings: TimingEntry[]): TimingEntry[] {
   const map = new Map<string, TimingEntry>();
 
@@ -501,16 +549,17 @@ function mergeAgentTimeline(agentTimeline: TimingEntry[] | undefined, cliTimings
   return [...map.values()].sort((a, b) => b.totalMs - a.totalMs);
 }
 
+/** 格式化本轮总耗时与各阶段明细 */
 function formatTimeline(entries: TimingEntry[], totalMs: number): string {
   const total = (totalMs / 1000).toFixed(1);
 
-  // Only LLM calls, no tool calls → just show total
+  // 仅 LLM、无工具调用时只显示总时长
   const hasTools = entries.some((e) => e.label !== 'llm');
   if (!hasTools) {
     return style.dim(`⠿ ${total}s`);
   }
 
-  // Show detailed timeline
+  // 含工具时展示分项耗时
   const parts = entries.map((e) => {
     const time = (e.totalMs / 1000).toFixed(1);
     return e.calls > 1 ? `${e.label} ${time}s (${e.calls})` : `${e.label} ${time}s`;
@@ -519,6 +568,10 @@ function formatTimeline(entries: TimingEntry[], totalMs: number): string {
   return style.dim(`⠿ ${total}s · ${parts.join(' · ')}`);
 }
 
+/**
+ * 创建 Agent 运行时上下文：配置、Provider、TerminalAgent 及流式回调
+ * API Key 缺失时输出提示并返回 null
+ */
 async function createRuntimeContext(
   cwd: string,
   modelOverride?: string,
@@ -558,15 +611,18 @@ async function createRuntimeContext(
     projectInstructions,
     session,
     initialPlan,
+    // 流式 token：停止 spinner，与 reasoning 输出互斥换行
     onToken: (token) => {
       stopTimerAndFreeze();
       streamedThisTurn = true;
       if (lastOutput === 'reasoning') writeOutput('\n');
       lastOutput = 'content';
+      // 分块写入，降低大 token 单次 write 延迟
       for (let i = 0; i < token.length; i += 4) {
         writeOutput(token.slice(i, i + 4));
       }
     },
+    // 推理/思考过程：斜体暗淡样式
     onReasoning: (text) => {
       stopTimerAndFreeze();
       if (lastOutput === 'content') writeOutput('\n');
@@ -577,23 +633,29 @@ async function createRuntimeContext(
   return { config, projectInstructions, runtime, agent, session };
 }
 
+/** 异步保存 Agent 对话历史（失败静默忽略） */
 function saveAgentHistory(cwd: string, agent: TerminalAgent, session: SessionSettings): void {
   saveHistory(cwd, agent.getHistory(), session.maxHistoryMessages).catch(() => {});
 }
 
+/** 将 CLI positional 参数拼成单条 prompt 字符串 */
 export function joinPromptArgs(parts: string[]): string {
   return parts.join(' ').trim();
 }
 
+/** 解析 --max-turns，非法值默认 10 */
 export function parseMaxTurns(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
 }
 
+/** 解析 --max-tool-rounds，非法值默认 6 */
 export function parseMaxToolRounds(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 6;
 }
+
+/** 一次性模式结束后收集 git status 与 diff --stat */
 async function createOneShotGitSummary(cwd: string): Promise<string> {
   const [status, diffStat] = await Promise.all([
     runGit(cwd, ['status', '--short']),
@@ -602,6 +664,7 @@ async function createOneShotGitSummary(cwd: string): Promise<string> {
   return formatOneShotGitSummary(status, diffStat);
 }
 
+/** 在指定目录执行 git 子命令，失败返回空字符串 */
 async function runGit(cwd: string, args: string[]): Promise<string> {
   try {
     const result = await execFileAsync('git', args, { cwd, windowsHide: true });
@@ -611,6 +674,7 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
   }
 }
 
+/** 格式化 one-shot 结束时的 Git 变更摘要 */
 export function formatOneShotGitSummary(status: string, diffStat: string): string {
   const cleanStatus = status.trimEnd();
   const cleanDiffStat = diffStat.trimEnd();
@@ -618,6 +682,7 @@ export function formatOneShotGitSummary(status: string, diffStat: string): strin
   return ['Git changes:', cleanStatus, cleanDiffStat].filter(Boolean).join('\n');
 }
 
+/** API Key 未配置时的提示文案 */
 export function formatMissingApiKeyMessage(): string {
   return [
     'HELIX_API_KEY is not set. Set HELIX_API_KEY to enable HelixCode agent reasoning.',
@@ -627,6 +692,7 @@ export function formatMissingApiKeyMessage(): string {
   ].join('\n');
 }
 
+/** 生成 --doctor 完整输出（含 .helix/config.json 内容） */
 export async function createDoctorOutput(cwd: string): Promise<string> {
   const config = loadConfig({ cwd });
   const projectInstructions = await loadProjectInstructions(config.cwd);
@@ -646,6 +712,7 @@ export async function createDoctorOutput(cwd: string): Promise<string> {
   }) + '\n' + fileConfigLines.join('\n');
 }
 
+/** 非 TTY 模式下读取 stdin 全部内容 */
 async function readAllStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of input) {
@@ -654,6 +721,9 @@ async function readAllStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/**
+ * 判断当前模块是否作为 CLI 入口直接运行（兼容 symlink / realpath）
+ */
 export async function isMainModule(metaUrl: string, argvPath: string | undefined): Promise<boolean> {
   if (!argvPath) return false;
   const modulePath = resolve(fileURLToPath(metaUrl));
