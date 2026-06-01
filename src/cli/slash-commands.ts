@@ -73,6 +73,8 @@ export interface SlashCommandContext {
   projectInstructions?: string[];
   planItems?: PlanItem[];
   compactedHistoryMessages?: number;
+  maxHistoryMessages?: number;
+  maxToolRounds?: number;
 }
 
 export function handleSlashCommand(
@@ -163,7 +165,8 @@ export function handleSlashCommand(
         `cwd: ${context.cwd ?? process.cwd()}`,
         `model: ${context.model ?? 'unknown'}`,
         `provider: ${context.provider ?? 'unknown'}`,
-        `history messages: ${context.historyMessages ?? 0}`,
+        `history messages: ${context.historyMessages ?? 0}${context.maxHistoryMessages ? ` / ${context.maxHistoryMessages} max` : ''}`,
+        `tool rounds per turn: ${context.maxToolRounds ?? 6}`,
         `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`
       ].join('\n')
     };
@@ -186,7 +189,9 @@ export function handleSlashCommand(
         'edit_file      Replace an inclusive line range after confirmation',
         'apply_patch    Apply a unified diff after confirmation',
         'run_shell      Run a shell command after confirmation',
-        'web_search     Search the web (needs BRAVE_API_KEY)',
+        'web_search     Search the web (Bing API or HTML fallback, no key required)',
+        'web_fetch      Fetch readable text from a URL (blocks private addresses)',
+        'update_plan    Track multi-step work',
       ].join('\n')
     };
   }

@@ -1,4 +1,5 @@
 ﻿import type { ToolDefinition } from '../llm/types.js';
+import { WEB_SEARCH_MAX_COUNT } from '../core/constants.js';
 import { readFileTool, searchFilesTool, listFilesTool, writeFileTool, replaceInFileTool, editFileTool } from './filesystem.js';
 import { gitStatusTool, gitDiffTool } from './git.js';
 import { applyPatchTool } from './patch.js';
@@ -231,7 +232,7 @@ export function createDefaultRegistry(): ToolRegistry {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Search query' },
-          count: { type: 'number', description: 'Number of results (max 10)' }
+          count: { type: 'number', description: `Number of results (max ${WEB_SEARCH_MAX_COUNT})` }
         },
         required: ['query']
       }

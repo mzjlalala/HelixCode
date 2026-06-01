@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadConfig, loadProjectInstructions, loadFileConfig, saveFileConfig, loadPermissionMode, savePermissionMode, mergeFileConfig } from '../src/core/config.js';
+import { loadConfig, loadProjectInstructions, loadFileConfig, saveFileConfig, loadPermissionMode, savePermissionMode, mergeFileConfig, resolveSessionSettings } from '../src/core/config.js';
 
 const originalEnv = { ...process.env };
 
@@ -153,5 +153,27 @@ describe('config file (.helix/config.json)', () => {
 
     const instructions = await loadProjectInstructions(cwd);
     expect(instructions).toEqual([{ path: 'CUSTOM.md', content: 'Custom instruction.' }]);
+  });
+});
+
+describe('resolveSessionSettings', () => {
+  it('uses defaults when file config omits session fields', () => {
+    expect(resolveSessionSettings({})).toEqual({
+      maxToolRounds: 6,
+      maxHistoryMessages: 80,
+      compactKeepMessages: 20
+    });
+  });
+
+  it('applies overrides from .helix/config.json fields', () => {
+    expect(resolveSessionSettings({
+      maxToolRounds: 12,
+      maxHistoryMessages: 50,
+      compactKeepMessages: 10
+    })).toEqual({
+      maxToolRounds: 12,
+      maxHistoryMessages: 50,
+      compactKeepMessages: 10
+    });
   });
 });

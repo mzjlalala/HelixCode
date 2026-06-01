@@ -1,9 +1,9 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import type { ChatMessage } from '../llm/types.js';
+import { DEFAULT_MAX_HISTORY_MESSAGES } from './constants.js';
 
 const HISTORY_FILE = '.helix/history.json';
-const MAX_SAVED = 40; // Keep up to 40 messages in the saved file
 
 export interface SavedSession {
   version: 1;
@@ -24,21 +24,20 @@ export async function loadHistory(cwd: string): Promise<ChatMessage[]> {
   }
 }
 
-export async function saveHistory(cwd: string, messages: ChatMessage[]): Promise<void> {
+export async function saveHistory(
+  cwd: string,
+  messages: ChatMessage[],
+  maxSaved = DEFAULT_MAX_HISTORY_MESSAGES
+): Promise<void> {
   const target = resolve(cwd, HISTORY_FILE);
   await mkdir(dirname(target), { recursive: true });
 
-  // Trim to max, but never break a tool call chain.
-  // Walk backward from the slice point to find a safe cut.
   let trimmed = messages;
-  if (trimmed.length > MAX_SAVED) {
+  if (trimmed.length > maxSaved) {
     const end = trimmed.length;
-    // Find the first safe position (not in the middle of tool messages following a tool_calls)
-    // Start from end - MAX_SAVED and walk forward past any trailing tool messages
-    let cutBefore = end - MAX_SAVED;
-    for (let i = cutBefore; i < end; i++) {
+    let cutBefore = end - maxSaved;
+    for (let i = cutBefore; i < end; i += 1) {
       const m = trimmed[i];
-      // Skip past tool messages — they belong to a preceding assistant
       if (m?.role === 'tool') {
         cutBefore = i + 1;
       } else {

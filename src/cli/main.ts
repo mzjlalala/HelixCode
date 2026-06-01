@@ -10,8 +10,9 @@ import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, savePermissionMode } from '../core/config.js';
+import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, resolveSessionSettings, savePermissionMode, type SessionSettings } from '../core/config.js';
 import { loadHistory, saveHistory } from '../core/history-store.js';
+import { loadPlan } from '../core/plan-store.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
 import { completeSlashCommand, formatDoctor, handleSlashCommand, SLASH_COMMANDS } from './slash-commands.js';
@@ -19,7 +20,7 @@ import { executeConfirmedTool, previewConfirmedTool } from '../agent/confirmed-a
 import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.js';
 import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
-import { undoLast } from '../tools/undo.js';
+import { undoLast, loadUndoStack } from '../tools/undo.js';
 
 // Windows console output helper.
 // On Windows TTY: use process.stdout.write() → WriteConsoleW (direct UTF-16, no codepage issues).
@@ -66,9 +67,11 @@ program
   .option('--max-turns <number>', 'Maximum one-shot confirmation turns', '10')
   .option('--model <name>', 'Chat model to use (overrides HELIX_CHAT_MODEL)')
   .option('--mode <name>', 'Permission mode: default|edit|plan|auto')
+  .option('--max-tool-rounds <number>', 'Max tool rounds per agent turn (overrides config)')
   .argument('[prompt...]', 'Task to run once without starting the REPL')
   .action(async (promptParts: string[], options: {
-    cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string; model?: string; mode?: string
+    cwd: string; doctor?: boolean; yes?: boolean; maxTurns?: string; model?: string; mode?: string;
+    maxToolRounds?: string;
   }) => {
     if (options.doctor) {
       output.write(`${await createDoctorOutput(options.cwd)}\n`);
@@ -79,11 +82,14 @@ program
       await runOnce(options.cwd, prompt, {
         autoConfirm: options.yes === true,
         maxTurns: parseMaxTurns(options.maxTurns),
-        ...(options.model ? { model: options.model } : {})
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.maxToolRounds ? { maxToolRounds: parseMaxToolRounds(options.maxToolRounds) } : {})
       });
       process.exit(process.exitCode || 0);
     }
-    await runRepl(options.cwd, options.model, options.mode as PermissionMode | undefined);
+    await runRepl(options.cwd, options.model, options.mode as PermissionMode | undefined, {
+      ...(options.maxToolRounds ? { maxToolRounds: parseMaxToolRounds(options.maxToolRounds) } : {})
+    });
   });
 
 let currentAbort: AbortController | null = null;
@@ -142,9 +148,11 @@ function stripMarkdown(text: string): string {
 export async function runOnce(
   cwd: string,
   prompt: string,
-  options: { autoConfirm?: boolean; maxTurns?: number; model?: string } = {}
+  options: { autoConfirm?: boolean; maxTurns?: number; model?: string; maxToolRounds?: number } = {}
 ): Promise<void> {
-  const context = await createRuntimeContext(cwd, options.model);
+  const context = await createRuntimeContext(cwd, options.model, {
+    ...(options.maxToolRounds ? { maxToolRounds: options.maxToolRounds } : {})
+  });
   if (!context) return;
   turnStartMs = performance.now();
   cliTimings = [];
@@ -162,10 +170,15 @@ export async function runOnce(
   output.write(`${style.info(await createOneShotGitSummary(context.config.cwd))}\n`);
 }
 
-export async function runRepl(cwd: string, modelOverride?: string, modeOverride?: PermissionMode): Promise<void> {
-  const context = await createRuntimeContext(cwd, modelOverride);
+export async function runRepl(
+  cwd: string,
+  modelOverride?: string,
+  modeOverride?: PermissionMode,
+  runtimeOpts: { maxToolRounds?: number } = {}
+): Promise<void> {
+  const context = await createRuntimeContext(cwd, modelOverride, runtimeOpts);
   if (!context) return;
-  const { config, projectInstructions, runtime, agent } = context;
+  const { config, projectInstructions, runtime, agent, session } = context;
 
   // Load initial permission mode: CLI --mode > .helix/config.json > default
   currentMode = modeOverride ?? (await loadPermissionMode(config.cwd)) ?? 'default';
@@ -185,9 +198,9 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
   if (!input.isTTY) {
     const content = await readAllStdin();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
-      const exit = await handleInputLine(line, { agent, config, projectInstructions, runtime, rl: null });
+      const exit = await handleInputLine(line, { agent, config, projectInstructions, runtime, rl: null, session });
       if (exit) {
-        saveHistory(config.cwd, agent.getHistory()).catch(() => {});
+        saveAgentHistory(config.cwd, agent, session);
         process.exit(0);
       }
     }
@@ -233,7 +246,7 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
     }
     closing = true;
     output.write(`\n${style.dim('Goodbye.')}\n`);
-    saveHistory(config.cwd, agent.getHistory()).catch(() => {});
+    saveAgentHistory(config.cwd, agent, session);
     rl.close();
     process.exit(0);
   });
@@ -250,8 +263,8 @@ export async function runRepl(cwd: string, modelOverride?: string, modeOverride?
       output.write(RESET);
     }
     if (!line) continue;
-    if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl })) {
-      saveHistory(config.cwd, agent.getHistory()).catch(() => {});
+    if (await handleInputLine(line, { agent, config, projectInstructions, runtime, rl, session })) {
+      saveAgentHistory(config.cwd, agent, session);
       process.exit(0);
     }
   }
@@ -267,6 +280,7 @@ async function handleInputLine(
     projectInstructions: Awaited<ReturnType<typeof loadProjectInstructions>>;
     runtime: { model: string };
     rl: ReturnType<typeof createInterface> | null;
+    session: SessionSettings;
   }
 ): Promise<boolean> {
   const slash = handleSlashCommand(line, {
@@ -279,7 +293,9 @@ async function handleInputLine(
     historyMessageList: context.agent.getHistory(),
     projectInstructions: context.projectInstructions.map((item) => item.path),
     planItems: context.agent.currentPlan(),
-    compactedHistoryMessages: 20
+    compactedHistoryMessages: context.session.compactKeepMessages,
+    maxHistoryMessages: context.session.maxHistoryMessages,
+    maxToolRounds: context.session.maxToolRounds
   });
   if (slash.handled) {
     if (slash.model) {
@@ -292,11 +308,11 @@ async function handleInputLine(
       savePermissionMode(context.config.cwd, currentMode).catch(() => {});
     }
     if (slash.compact) {
-      context.agent.compactHistory(slash.compactKeep ?? 20);
+      context.agent.compactHistory(slash.compactKeep ?? context.session.compactKeepMessages);
     }
     output.write(`${slash.output}\n`);
     if (slash.historySave) {
-      saveHistory(context.config.cwd, context.agent.getHistory()).catch(() => {});
+      saveAgentHistory(context.config.cwd, context.agent, context.session);
     }
     if (slash.undo) {
       undoLast(context.config.cwd).then((result) => {
@@ -340,7 +356,7 @@ async function handleInputLine(
     if (currentAbort === abort) currentAbort = null;
   }
   // Auto-save history after each turn
-  saveHistory(context.config.cwd, context.agent.getHistory()).catch(() => {});
+  saveAgentHistory(context.config.cwd, context.agent, context.session);
   return false;
 }
 
@@ -503,11 +519,16 @@ function formatTimeline(entries: TimingEntry[], totalMs: number): string {
   return style.dim(`⠿ ${total}s · ${parts.join(' · ')}`);
 }
 
-async function createRuntimeContext(cwd: string, modelOverride?: string): Promise<{
+async function createRuntimeContext(
+  cwd: string,
+  modelOverride?: string,
+  runtimeOpts: { maxToolRounds?: number } = {}
+): Promise<{
   config: ReturnType<typeof loadConfig>;
   projectInstructions: Awaited<ReturnType<typeof loadProjectInstructions>>;
   runtime: { model: string };
   agent: TerminalAgent;
+  session: SessionSettings;
 } | null> {
   const config = loadConfig({ cwd });
   if (modelOverride) {
@@ -519,6 +540,15 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     return null;
   }
 
+  const fileConfig = await loadFileConfig(config.cwd);
+  const session = resolveSessionSettings(fileConfig);
+  if (runtimeOpts.maxToolRounds) {
+    session.maxToolRounds = runtimeOpts.maxToolRounds;
+  }
+
+  await loadUndoStack(config.cwd);
+  const initialPlan = await loadPlan(config.cwd);
+
   const projectInstructions = await loadProjectInstructions(config.cwd);
   const runtime = { model: config.model };
   const provider = new OpenAIChatProvider(config, runtime);
@@ -526,12 +556,13 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
     cwd: config.cwd,
     provider,
     projectInstructions,
+    session,
+    initialPlan,
     onToken: (token) => {
       stopTimerAndFreeze();
       streamedThisTurn = true;
       if (lastOutput === 'reasoning') writeOutput('\n');
       lastOutput = 'content';
-      // Write in small synchronous bursts so Windows console renders progressively
       for (let i = 0; i < token.length; i += 4) {
         writeOutput(token.slice(i, i + 4));
       }
@@ -543,7 +574,11 @@ async function createRuntimeContext(cwd: string, modelOverride?: string): Promis
       writeOutput(`\x1b[2m\x1b[3m${text}\x1b[0m`);
     }
   });
-  return { config, projectInstructions, runtime, agent };
+  return { config, projectInstructions, runtime, agent, session };
+}
+
+function saveAgentHistory(cwd: string, agent: TerminalAgent, session: SessionSettings): void {
+  saveHistory(cwd, agent.getHistory(), session.maxHistoryMessages).catch(() => {});
 }
 
 export function joinPromptArgs(parts: string[]): string {
@@ -553,6 +588,11 @@ export function joinPromptArgs(parts: string[]): string {
 export function parseMaxTurns(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
+}
+
+export function parseMaxToolRounds(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 6;
 }
 async function createOneShotGitSummary(cwd: string): Promise<string> {
   const [status, diffStat] = await Promise.all([

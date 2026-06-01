@@ -4,8 +4,10 @@
  * web_search: Primary path uses Bing Web Search API (HELIX_BING_API_KEY).
  *   Falls back to HTML scraping of cn.bing.com with 4 layered parsing
  *   strategies so a single mark-up change won't break search entirely.
- * web_fetch: fetches a URL and extracts readable text content.
+ * web_fetch: fetches a URL and extracts readable text content (blocks private URLs).
  */
+
+import { WEB_SEARCH_DEFAULT_COUNT, WEB_SEARCH_MAX_COUNT } from '../core/constants.js';
 
 export interface WebSearchResult {
   title: string;
@@ -29,7 +31,7 @@ export async function webSearchTool(
 ): Promise<WebToolResult> {
   if (!query.trim()) return { ok: false, error: 'web_search requires a query.' };
 
-  const maxResults = Math.min(Math.max(count ?? 8, 1), 15);
+  const maxResults = Math.min(Math.max(count ?? WEB_SEARCH_DEFAULT_COUNT, 1), WEB_SEARCH_MAX_COUNT);
 
   // 1) Try Bing Web Search API when a key is configured
   const apiKey = process.env.HELIX_BING_API_KEY?.trim();
@@ -327,14 +329,19 @@ function parseGenericStrategy(html: string, maxResults: number): WebSearchResult
 export async function webFetchTool(urlString: string): Promise<WebToolResult> {
   if (!urlString.trim()) return { ok: false, error: 'web_fetch requires a URL.' };
 
+  let parsed: URL;
   try {
-    new URL(urlString);
+    parsed = new URL(urlString);
   } catch {
     return { ok: false, error: `Invalid URL: ${urlString}` };
   }
 
+  if (isBlockedFetchUrl(parsed)) {
+    return { ok: false, error: `Blocked URL (private or unsupported scheme): ${urlString}` };
+  }
+
   try {
-    const response = await fetch(urlString, {
+    const response = await fetch(parsed.toString(), {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -405,4 +412,23 @@ function stripHtml(html: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Block SSRF targets: non-http(s), localhost, and private IP ranges. */
+export function isBlockedFetchUrl(url: URL): boolean {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return true;
+
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '0.0.0.0' || host.endsWith('.local')) return true;
+  if (host === '::1' || host.startsWith('127.')) return true;
+
+  // IPv4 private ranges
+  if (/^10\./.test(host)) return true;
+  if (/^192\.168\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+
+  // IPv6 loopback / link-local / unique-local (simplified)
+  if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
+
+  return false;
 }

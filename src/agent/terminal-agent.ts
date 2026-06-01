@@ -1,8 +1,10 @@
 ﻿import { classifyShellCommand } from '../tools/shell.js';
 import { createDefaultRegistry, ToolRegistry } from '../tools/registry.js';
-import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '../llm/types.js';
+import type { ChatMessage, ChatProvider, ToolCall } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
-import type { ProjectInstruction } from '../core/config.js';
+import type { ProjectInstruction, SessionSettings } from '../core/config.js';
+import { savePlan } from '../core/plan-store.js';
+import { DEFAULT_COMPACT_KEEP_MESSAGES, DEFAULT_MAX_HISTORY_MESSAGES, DEFAULT_MAX_TOOL_ROUNDS } from '../core/constants.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string; timeline?: TimingEntry[] }
@@ -62,6 +64,8 @@ export class TerminalAgent {
   private readonly plan: PlanItem[] = [];
   private readonly timeline = new Timeline();
   private readonly registry: ToolRegistry;
+  private readonly maxToolRounds: number;
+  private readonly maxHistoryMessages: number;
 
   constructor(private readonly options: {
     cwd: string;
@@ -71,9 +75,17 @@ export class TerminalAgent {
     onReasoning?: (text: string) => void;
     /** Inject a custom tool registry (defaults to the built-in one). */
     registry?: ToolRegistry;
+    /** Session limits from .helix/config.json */
+    session?: SessionSettings;
+    /** Restored plan items from .helix/plan.json */
+    initialPlan?: PlanItem[];
   }) {
     this.registry = options.registry ?? createDefaultRegistry();
-    // Wire up the agent-owned update_plan callback
+    this.maxToolRounds = options.session?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+    this.maxHistoryMessages = options.session?.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
+    if (options.initialPlan?.length) {
+      this.plan.push(...options.initialPlan.map((item) => ({ ...item })));
+    }
     this.registry.setUpdatePlan((args) => JSON.stringify(this.updatePlan(args)));
   }
 
@@ -128,7 +140,7 @@ export class TerminalAgent {
     return [...this.history];
   }
 
-  compactHistory(keepMessages = 20): number {
+  compactHistory(keepMessages = DEFAULT_COMPACT_KEEP_MESSAGES): number {
     const keep = Math.max(0, Math.floor(keepMessages));
     if (this.history.length > keep) {
       this.history.splice(0, this.history.length - keep);
@@ -167,7 +179,7 @@ export class TerminalAgent {
       ...turnMessages
     ];
 
-    for (let i = 0; i < 6; i += 1) {
+    for (let i = 0; i < this.maxToolRounds; i += 1) {
       const llmStart = performance.now();
       const result = await this.getLLMResponse(messages, signal);
 
@@ -180,71 +192,15 @@ export class TerminalAgent {
 
       // Native tool calls from the provider
       if (result.type === 'tool_calls') {
-        const reasoningContent = result.reasoning_content ?? null;
-        for (const call of result.calls) {
-          turnMessages.push({
-            role: 'assistant',
-            content: result.content ?? null,
-            tool_calls: [call],
-            reasoning_content: reasoningContent
-          });
-
-          if (this.registry.hasShellRisk(call.name)) {
-            const command = String(call.arguments.command ?? '').trim();
-            const risk = classifyShellCommand(command);
-            if (risk.risk === 'blocked') {
-              turnMessages.push({
-                role: 'tool',
-                content: JSON.stringify({ ok: false, error: risk.reason ?? 'Command blocked.' }),
-                tool_call_id: call.id
-              });
-              this.appendHistory(turnMessages);
-              return { type: 'final', message: risk.reason ?? 'Command blocked.', timeline: this.timeline.snapshot() };
-            }
-            this.appendHistory(turnMessages);
-            return {
-              type: 'confirmation',
-              tool: call.name,
-              args: call.arguments,
-              summary: toolSummary(call.name, call.arguments),
-              tool_call_id: call.id,
-              timeline: this.timeline.snapshot()
-            };
-          }
-
-          if (this.registry.isConfirmed(call.name)) {
-            this.appendHistory(turnMessages);
-            return {
-              type: 'confirmation',
-              tool: call.name,
-              args: call.arguments,
-              summary: toolSummary(call.name, call.arguments),
-              tool_call_id: call.id,
-              timeline: this.timeline.snapshot()
-            };
-          }
-
-          // Safe tool — execute inline
-          if (signal?.aborted) {
-            this.appendHistory(turnMessages);
-            return { type: 'final', message: 'Interrupted.', timeline: this.timeline.snapshot() };
-          }
-          const observation = await this.executeTool(call, signal);
-          turnMessages.push({
-            role: 'tool',
-            content: observation,
-            tool_call_id: call.id
-          });
-        }
-
-        // Rebuild messages for next iteration
-        messages.splice(
-          0,
-          messages.length,
-          { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
-          ...this.history,
-          ...turnMessages
+        const batchResult = await this.handleToolCallsBatch(
+          result.calls,
+          result.content ?? null,
+          result.reasoning_content ?? null,
+          turnMessages,
+          messages,
+          signal
         );
+        if (batchResult) return batchResult;
         continue;
       }
 
@@ -302,6 +258,103 @@ export class TerminalAgent {
     return { type: 'final', message: 'HelixCode stopped after too many tool rounds.', timeline: this.timeline.snapshot() };
   }
 
+  /** Process a batch of native tool_calls: parallel safe tools, then confirm/block. */
+  private async handleToolCallsBatch(
+    calls: ToolCall[],
+    assistantContent: string | null,
+    reasoningContent: string | null,
+    turnMessages: ChatMessage[],
+    messages: ChatMessage[],
+    signal?: AbortSignal
+  ): Promise<AgentTurnResult | null> {
+    let stopIndex = calls.length;
+    let stopReason: 'confirm' | 'block' | null = null;
+    let blockMessage: string | undefined;
+
+    for (let idx = 0; idx < calls.length; idx += 1) {
+      const call = calls[idx]!;
+      turnMessages.push({
+        role: 'assistant',
+        content: assistantContent,
+        tool_calls: [call],
+        reasoning_content: reasoningContent
+      });
+
+      if (this.registry.hasShellRisk(call.name)) {
+        const command = String(call.arguments.command ?? '').trim();
+        const risk = classifyShellCommand(command);
+        if (risk.risk === 'blocked') {
+          stopIndex = idx;
+          stopReason = 'block';
+          blockMessage = risk.reason ?? 'Command blocked.';
+          break;
+        }
+        stopIndex = idx;
+        stopReason = 'confirm';
+        break;
+      }
+
+      if (this.registry.isConfirmed(call.name)) {
+        stopIndex = idx;
+        stopReason = 'confirm';
+        break;
+      }
+    }
+
+    const safeCalls = calls.slice(0, stopReason === null ? calls.length : stopIndex);
+
+    if (signal?.aborted && safeCalls.length > 0) {
+      this.appendHistory(turnMessages);
+      return { type: 'final', message: 'Interrupted.', timeline: this.timeline.snapshot() };
+    }
+
+    if (safeCalls.length > 0) {
+      const observations = await Promise.all(
+        safeCalls.map((call) => this.executeTool(call, signal))
+      );
+      for (let idx = 0; idx < safeCalls.length; idx += 1) {
+        turnMessages.push({
+          role: 'tool',
+          content: observations[idx] ?? JSON.stringify({ ok: false, error: 'No observation.' }),
+          tool_call_id: safeCalls[idx]!.id
+        });
+      }
+    }
+
+    if (stopReason === 'block') {
+      const blocked = calls[stopIndex]!;
+      turnMessages.push({
+        role: 'tool',
+        content: JSON.stringify({ ok: false, error: blockMessage ?? 'Command blocked.' }),
+        tool_call_id: blocked.id
+      });
+      this.appendHistory(turnMessages);
+      return { type: 'final', message: blockMessage ?? 'Command blocked.', timeline: this.timeline.snapshot() };
+    }
+
+    if (stopReason === 'confirm') {
+      const pending = calls[stopIndex]!;
+      this.appendHistory(turnMessages);
+      return {
+        type: 'confirmation',
+        tool: pending.name,
+        args: pending.arguments,
+        summary: toolSummary(pending.name, pending.arguments),
+        tool_call_id: pending.id,
+        timeline: this.timeline.snapshot()
+      };
+    }
+
+    messages.splice(
+      0,
+      messages.length,
+      { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
+      ...this.history,
+      ...turnMessages
+    );
+    return null;
+  }
+
   private async getLLMResponse(
     messages: ChatMessage[],
     signal?: AbortSignal
@@ -345,14 +398,14 @@ export class TerminalAgent {
       nextPlan.push({ step: item.step, status: item.status });
     }
     this.plan.splice(0, this.plan.length, ...nextPlan);
+    savePlan(this.options.cwd, this.currentPlan()).catch(() => {});
     return { ok: true, plan: this.currentPlan() };
   }
 
   private appendHistory(messages: ChatMessage[]): void {
     this.history.push(...messages);
-    const maxMessages = 80;
-    if (this.history.length > maxMessages) {
-      this.history.splice(0, this.history.length - maxMessages);
+    if (this.history.length > this.maxHistoryMessages) {
+      this.history.splice(0, this.history.length - this.maxHistoryMessages);
     }
   }
 }

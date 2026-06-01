@@ -20,7 +20,10 @@ export function classifyShellCommand(command: string): ShellRisk {
     /\bdel\s+\/[sq]\b/i,
     /\brmdir\s+\/s\b/i,
     /\bformat\b/i,
-    /\bdiskpart\b/i
+    /\bdiskpart\b/i,
+    /\bcurl\s+[^\n|]*\|\s*(ba)?sh\b/i,
+    /\bwget\s+[^\n|]*\|\s*(ba)?sh\b/i,
+    /\bpowershell\s+-(?:enc|e)\b/i
   ];
 
   if (destructivePatterns.some((pattern) => pattern.test(command))) {

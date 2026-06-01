@@ -2,6 +2,11 @@ import 'dotenv/config';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import type { PermissionMode } from '../cli/permission-mode.js';
+import {
+  DEFAULT_COMPACT_KEEP_MESSAGES,
+  DEFAULT_MAX_HISTORY_MESSAGES,
+  DEFAULT_MAX_TOOL_ROUNDS
+} from './constants.js';
 
 export type LlmProvider = 'openai' | 'deepseek' | 'custom';
 
@@ -21,6 +26,30 @@ export interface HelixFileConfig {
   permissionMode?: PermissionMode;
   /** Paths to project instruction files, relative to project root */
   instructions?: string[];
+  /** Max tool rounds per agent run (default 6). */
+  maxToolRounds?: number;
+  /** In-memory and persisted history cap (default 80). */
+  maxHistoryMessages?: number;
+  /** Default /compact keep count (default 20). */
+  compactKeepMessages?: number;
+}
+
+export interface SessionSettings {
+  maxToolRounds: number;
+  maxHistoryMessages: number;
+  compactKeepMessages: number;
+}
+
+export function resolveSessionSettings(file: HelixFileConfig = {}): SessionSettings {
+  return {
+    maxToolRounds: positiveInt(file.maxToolRounds, DEFAULT_MAX_TOOL_ROUNDS),
+    maxHistoryMessages: positiveInt(file.maxHistoryMessages, DEFAULT_MAX_HISTORY_MESSAGES),
+    compactKeepMessages: positiveInt(file.compactKeepMessages, DEFAULT_COMPACT_KEEP_MESSAGES)
+  };
+}
+
+function positiveInt(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 export interface ProjectInstruction {

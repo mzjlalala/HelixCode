@@ -1,6 +1,16 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, relative, resolve } from 'node:path';
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { dirname, extname, relative, resolve } from 'node:path';
 import picomatch from 'picomatch';
+import {
+  BINARY_EXTENSIONS,
+  DEFAULT_SEARCH_MAX_RESULTS,
+  IGNORED_DIRS,
+  MAX_SEARCH_FILE_BYTES
+} from '../core/constants.js';
+
+const execFileAsync = promisify(execFile);
 
 export type FileToolResult =
   | { ok: true; content: string }
@@ -160,7 +170,7 @@ async function walk(cwd: string, dir = '.', signal?: AbortSignal): Promise<strin
     if (signal?.aborted) break;
     const child = dir === '.' ? entry.name : `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      if (['.git', 'node_modules', 'dist', 'coverage', '.helix'].includes(entry.name)) continue;
+      if (IGNORED_DIRS.has(entry.name)) continue;
       files.push(...await walk(cwd, child, signal));
     } else if (entry.isFile()) {
       files.push(child);
@@ -168,6 +178,20 @@ async function walk(cwd: string, dir = '.', signal?: AbortSignal): Promise<strin
   }
 
   return files;
+}
+
+function isSearchableTextFile(path: string): boolean {
+  const ext = extname(path).toLowerCase();
+  return !BINARY_EXTENSIONS.has(ext);
+}
+
+async function isWithinSizeLimit(cwd: string, relPath: string): Promise<boolean> {
+  try {
+    const info = await stat(resolve(cwd, relPath));
+    return info.size <= MAX_SEARCH_FILE_BYTES;
+  } catch {
+    return false;
+  }
 }
 
 export async function listFilesTool(cwd: string, signal?: AbortSignal): Promise<{ ok: true; files: string[] } | { ok: false; error: string }> {
@@ -194,36 +218,169 @@ export async function searchFilesTool(
     return { ok: false, error: 'search_files requires a string query.' };
   }
 
-  const listed = await listFilesTool(cwd, signal);
+  const caseSensitive = args.caseSensitive === true;
+  const maxResults = positiveInteger(args.maxResults, DEFAULT_SEARCH_MAX_RESULTS);
+  const contextLines = positiveInteger(args.contextLines, 0);
+  const globPattern = typeof args.glob === 'string' && args.glob.trim() ? args.glob.trim() : undefined;
+
+  const searchOpts = {
+    query: args.query,
+    caseSensitive,
+    maxResults,
+    contextLines,
+    ...(globPattern ? { glob: globPattern } : {}),
+    ...(signal ? { signal } : {})
+  };
+
+  const rgResult = await searchWithRipgrep(cwd, searchOpts);
+  if (rgResult) return rgResult;
+
+  return searchFilesInMemory(cwd, searchOpts);
+}
+
+async function searchWithRipgrep(
+  cwd: string,
+  options: {
+    query: string;
+    glob?: string;
+    caseSensitive: boolean;
+    maxResults: number;
+    contextLines: number;
+    signal?: AbortSignal;
+  }
+): Promise<SearchToolResult | null> {
+  if (options.signal?.aborted) return { ok: true, matches: [] };
+
+  const rgArgs = [
+    '--json',
+    '--line-number',
+    '--max-count', String(options.maxResults),
+    '--glob', '!node_modules/**',
+    '--glob', '!.git/**',
+    '--glob', '!dist/**',
+    '--glob', '!coverage/**',
+    '--glob', '!.helix/**'
+  ];
+  if (!options.caseSensitive) rgArgs.push('-i');
+  if (options.glob) rgArgs.push('--glob', options.glob);
+  if (options.contextLines > 0) {
+    rgArgs.push('-C', String(options.contextLines));
+  }
+  rgArgs.push('--', options.query);
+
+  try {
+    const { stdout } = await execFileAsync('rg', rgArgs, {
+      cwd,
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 30_000
+    });
+    return parseRipgrepJson(stdout, options.maxResults, options.contextLines);
+  } catch (error) {
+    const err = error as { code?: number | string; killed?: boolean; stdout?: string };
+    if (err.code === 1) {
+      // rg exit 1 = no matches
+      return { ok: true, matches: [] };
+    }
+    if (err.stdout && typeof err.stdout === 'string') {
+      const parsed = parseRipgrepJson(err.stdout, options.maxResults, options.contextLines);
+      if (parsed.ok && parsed.matches.length > 0) return parsed;
+    }
+    return null;
+  }
+}
+
+function parseRipgrepJson(
+  stdout: string,
+  maxResults: number,
+  contextLines: number
+): SearchToolResult {
+  const matches: SearchMatch[] = [];
+  const pendingContext = new Map<string, { before: string[]; after: string[] }>();
+
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        data?: {
+          path?: { text?: string };
+          line_number?: number;
+          lines?: { text?: string };
+        };
+      };
+      if (event.type === 'match' && event.data?.path?.text) {
+        const path = event.data.path.text.replace(/\\/g, '/');
+        const ctx = pendingContext.get(path);
+        matches.push({
+          path,
+          line: event.data.line_number ?? 0,
+          text: (event.data.lines?.text ?? '').replace(/\r?\n$/, ''),
+          ...(contextLines > 0 && ctx ? { before: ctx.before, after: ctx.after } : {})
+        });
+        pendingContext.delete(path);
+        if (matches.length >= maxResults) break;
+      }
+      if (event.type === 'context' && contextLines > 0 && event.data?.path?.text) {
+        const path = event.data.path.text.replace(/\\/g, '/');
+        const text = (event.data.lines?.text ?? '').replace(/\r?\n$/, '');
+        const bucket = pendingContext.get(path) ?? { before: [], after: [] };
+        if (matches.at(-1)?.path === path) {
+          bucket.after.push(text);
+        } else {
+          bucket.before.push(text);
+        }
+        pendingContext.set(path, bucket);
+      }
+    } catch {
+      // skip malformed rg json line
+    }
+  }
+
+  return { ok: true, matches };
+}
+
+async function searchFilesInMemory(
+  cwd: string,
+  options: {
+    query: string;
+    glob?: string;
+    caseSensitive: boolean;
+    maxResults: number;
+    contextLines: number;
+    signal?: AbortSignal;
+  }
+): Promise<SearchToolResult> {
+  const listed = await listFilesTool(cwd, options.signal);
   if (!listed.ok) return listed;
 
   const matches: SearchMatch[] = [];
-  const caseSensitive = args.caseSensitive === true;
-  const maxResults = positiveInteger(args.maxResults, 100);
-  const contextLines = positiveInteger(args.contextLines, 0);
-  const needle = caseSensitive ? args.query : args.query.toLowerCase();
+  const needle = options.caseSensitive ? options.query : options.query.toLowerCase();
 
   for (const path of listed.files) {
-    if (signal?.aborted) return { ok: true, matches };
-    if (typeof args.glob === 'string' && args.glob.trim() && !matchesGlob(path, args.glob)) continue;
-    const file = await readFileTool(cwd, { path }, signal);
+    if (options.signal?.aborted) return { ok: true, matches };
+    if (options.glob && !matchesGlob(path, options.glob)) continue;
+    if (!isSearchableTextFile(path)) continue;
+    if (!(await isWithinSizeLimit(cwd, path))) continue;
+
+    const file = await readFileTool(cwd, { path }, options.signal);
     if (!file.ok) continue;
     const lines = file.content.split(/\r?\n/);
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index] ?? '';
-      const haystack = caseSensitive ? line : line.toLowerCase();
+      const haystack = options.caseSensitive ? line : line.toLowerCase();
       if (haystack.includes(needle)) {
         const match: SearchMatch = {
           path,
           line: index + 1,
           text: line
         };
-        if (contextLines) {
-          match.before = lines.slice(Math.max(0, index - contextLines), index);
-          match.after = lines.slice(index + 1, index + 1 + contextLines);
+        if (options.contextLines) {
+          match.before = lines.slice(Math.max(0, index - options.contextLines), index);
+          match.after = lines.slice(index + 1, index + 1 + options.contextLines);
         }
         matches.push(match);
-        if (matches.length >= maxResults) return { ok: true, matches };
+        if (matches.length >= options.maxResults) return { ok: true, matches };
       }
     }
   }

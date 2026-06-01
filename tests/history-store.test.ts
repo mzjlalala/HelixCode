@@ -38,7 +38,7 @@ describe('history-store', () => {
     expect(messages).toEqual([]);
   });
 
-  it('limits saved messages to MAX_SAVED (40)', async () => {
+  it('limits saved messages to configured max (default 80)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'helix-history-'));
     const manyMessages: ChatMessage[] = [];
     for (let i = 0; i < 100; i++) {
@@ -47,7 +47,20 @@ describe('history-store', () => {
 
     await saveHistory(cwd, manyMessages);
     const loaded = await loadHistory(cwd);
-    expect(loaded.length).toBeLessThanOrEqual(40);
-    expect(loaded[0]?.content).toBe('msg 60');
+    expect(loaded.length).toBeLessThanOrEqual(80);
+    expect(loaded[0]?.content).toBe('msg 20');
+  });
+
+  it('honors custom maxSaved parameter', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-history-'));
+    const manyMessages: ChatMessage[] = [];
+    for (let i = 0; i < 50; i++) {
+      manyMessages.push({ role: 'user', content: `msg ${i}` });
+    }
+
+    await saveHistory(cwd, manyMessages, 10);
+    const loaded = await loadHistory(cwd);
+    expect(loaded).toHaveLength(10);
+    expect(loaded[0]?.content).toBe('msg 40');
   });
 });
