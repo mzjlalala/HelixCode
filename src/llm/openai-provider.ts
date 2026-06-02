@@ -8,6 +8,7 @@
 
 import type { HelixConfig } from '../core/config.js';
 import type { ChatMessage, ChatProvider, ChatResult, ToolCall, ToolDefinition } from './types.js';
+import { parseTokenUsage, type TokenUsage } from './usage.js';
 
 // ── 流式 delta 结构（SSE 解析后消费） ────────────────────────
 
@@ -30,6 +31,8 @@ interface StreamDelta {
  */
 class StreamAccumulator {
   fullContent = '';
+  /** 流式末 chunk 的 usage（需 stream_options.include_usage） */
+  usage?: TokenUsage;
   private hasToolCalls = false;
   /** 按 stream index 合并同一 tool_call 的分片（id/name/arguments 可能分多 chunk 到达） */
   private calls = new Map<number, { id: string; name: string; args: string }>();
@@ -64,6 +67,12 @@ class StreamAccumulator {
     }
   }
 
+  /** 记录 SSE chunk 中的 usage（DeepSeek/OpenAI 流式末包） */
+  setUsage(raw: unknown): void {
+    const parsed = parseTokenUsage(raw);
+    if (parsed) this.usage = parsed;
+  }
+
   /** 流结束后组装最终 ChatResult：优先 tool_calls，否则返回文本。 */
   finalize(): ChatResult {
     if (this.hasToolCalls && this.calls.size > 0) {
@@ -76,11 +85,18 @@ class StreamAccumulator {
         }))
         .filter((tc) => tc.id && tc.name);
       if (toolCalls.length > 0) {
-        return { type: 'tool_calls', calls: toolCalls, content: this.fullContent || null };
+        return withUsage(
+          { type: 'tool_calls', calls: toolCalls, content: this.fullContent || null },
+          this.usage
+        );
       }
     }
-    return { type: 'text', content: this.fullContent };
+    return withUsage({ type: 'text', content: this.fullContent }, this.usage);
   }
+}
+
+function withUsage<T extends ChatResult>(result: T, usage?: TokenUsage): ChatResult {
+  return usage ? { ...result, usage } : result;
 }
 
 // ── OpenAI 工具格式转换 ──────────────────────────────────────
@@ -108,13 +124,17 @@ function buildRequestBody(
     messages: messages.map(serializeMessage),
     temperature: 0.2
   };
-  if (stream) body.stream = true;
+  if (stream) {
+    body.stream = true;
+    // DeepSeek / OpenAI：流式末 chunk 返回 usage（见 API 文档 stream_options）
+    body.stream_options = { include_usage: true };
+  }
   if (tools && tools.length > 0) {
     body.tools = buildOpenAITools(tools);
     body.tool_choice = 'auto';
   }
   if (config.provider === 'deepseek') {
-    body.extra_body = { thinking: { type: 'enabled' } };
+    body.thinking = { type: 'enabled' };
   }
   return body;
 }
@@ -161,6 +181,7 @@ function parseChatResponse(
   json: unknown
 ): ChatResult {
   const data = json as {
+    usage?: unknown;
     choices?: Array<{
       message: {
         content?: string | null;
@@ -174,8 +195,9 @@ function parseChatResponse(
     }>;
   };
 
+  const usage = parseTokenUsage(data.usage);
   const choice = data.choices?.[0]?.message;
-  if (!choice) return { type: 'text', content: '' };
+  if (!choice) return withUsage({ type: 'text', content: '' }, usage);
 
   const reasoning_content = choice.reasoning_content ?? null;
 
@@ -188,11 +210,11 @@ function parseChatResponse(
         return { id: tc.id, name: tc.function.name, arguments: parsed };
       });
     if (calls.length > 0) {
-      return { type: 'tool_calls', calls, reasoning_content };
+      return withUsage({ type: 'tool_calls', calls, reasoning_content }, usage);
     }
   }
 
-  return { type: 'text', content: choice.content ?? '', reasoning_content };
+  return withUsage({ type: 'text', content: choice.content ?? '', reasoning_content }, usage);
 }
 
 // ── 非流式：fetch 实现 ────────────────────────────────────────
@@ -281,7 +303,11 @@ async function fetchCompleteStream(
           if (data === '[DONE]') break;
 
           try {
-            const chunk = JSON.parse(data) as { choices?: Array<{ delta?: StreamDelta; finish_reason?: string | null }> };
+            const chunk = JSON.parse(data) as {
+              choices?: Array<{ delta?: StreamDelta; finish_reason?: string | null }>;
+              usage?: unknown | null;
+            };
+            if (chunk.usage) acc.setUsage(chunk.usage);
             const delta = chunk.choices?.[0]?.delta;
             if (delta) acc.addDelta(delta, onToken, onReasoning);
           } catch {

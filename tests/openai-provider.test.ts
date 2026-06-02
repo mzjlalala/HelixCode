@@ -29,7 +29,7 @@ describe('OpenAIChatProvider', () => {
       { role: 'user', content: 'Hi' }
     ]);
 
-    expect(result).toEqual({ type: 'text', content: 'hello from model', reasoning_content: null });
+    expect(result).toEqual({ type: 'text', content: 'hello from model', reasoning_content: null, usage: undefined });
 
     // Verify fetch was called with the right URL and body shape
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -40,6 +40,7 @@ describe('OpenAIChatProvider', () => {
     expect(body.model).toBe('deepseek-reasoner');
     expect(body.messages).toEqual([{ role: 'user', content: 'Hi' }]);
     expect(body.temperature).toBe(0.2);
+    expect(body.thinking).toEqual({ type: 'enabled' });
 
     vi.unstubAllGlobals();
   });
@@ -95,6 +96,68 @@ describe('OpenAIChatProvider', () => {
       expect(result.calls).toHaveLength(1);
       expect(result.calls[0]).toMatchObject({ id: 'call_1', name: 'read_file' });
     }
+
+    vi.unstubAllGlobals();
+  });
+
+  it('parses usage from non-streaming response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ok' } }],
+        usage: {
+          prompt_tokens: 42,
+          completion_tokens: 7,
+          total_tokens: 49,
+          prompt_cache_hit_tokens: 10,
+          prompt_cache_miss_tokens: 32
+        }
+      })
+    }));
+
+    const provider = new OpenAIChatProvider(config());
+    const result = await provider.complete([{ role: 'user', content: 'Hi' }]);
+
+    expect(result.usage).toEqual({
+      prompt_tokens: 42,
+      completion_tokens: 7,
+      total_tokens: 49,
+      prompt_cache_hit_tokens: 10,
+      prompt_cache_miss_tokens: 32
+    });
+
+    vi.unstubAllGlobals();
+  });
+
+  it('requests stream_options.include_usage when streaming', async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'));
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n'
+        ));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      body: stream
+    }));
+
+    const provider = new OpenAIChatProvider(config());
+    const result = await provider.completeStream([{ role: 'user', content: 'Hi' }], () => {});
+
+    expect(result.usage).toEqual({
+      prompt_tokens: 5,
+      completion_tokens: 2,
+      total_tokens: 7
+    });
+
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[0]![1] as RequestInit).body as string) as Record<string, unknown>;
+    expect(body.stream_options).toEqual({ include_usage: true });
 
     vi.unstubAllGlobals();
   });

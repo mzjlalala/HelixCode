@@ -12,15 +12,28 @@ import {
   BINARY_EXTENSIONS,
   DEFAULT_SEARCH_MAX_RESULTS,
   IGNORED_DIRS,
-  MAX_SEARCH_FILE_BYTES
+  MAX_SEARCH_FILE_BYTES,
+  READ_FILE_HINT_MIN_LINES,
+  READ_FILE_HINT_TOKEN_THRESHOLD
 } from '../core/constants.js';
+import { estimateTextTokens } from '../core/token-estimate.js';
 
 const execFileAsync = promisify(execFile);
 
+/** read_file 成功时的结果（可含大文件提示） */
+export type ReadFileOk = {
+  ok: true;
+  content: string;
+  /** 文件总行数（按换行计） */
+  lines?: number;
+  /** 返回内容的估算 token */
+  estimatedTokens?: number;
+  /** 大文件未指定行范围时的阅读建议 */
+  hint?: string;
+};
+
 /** 单文件读/写类工具的通用结果 */
-export type FileToolResult =
-  | { ok: true; content: string }
-  | { ok: false; error: string };
+export type FileToolResult = ReadFileOk | { ok: false; error: string };
 
 /** 单次搜索命中：路径、行号、匹配行及可选上下文 */
 export interface SearchMatch {
@@ -64,9 +77,29 @@ export async function readFileTool(
 
   try {
     const content = await readFile(resolved.content, 'utf8');
+    const normalized = content.replace(/\r\n/g, '\n');
+    const lineCount = normalized === '' ? 0 : normalized.replace(/\n$/, '').split('\n').length;
     const ranged = selectLineRange(content, args.startLine, args.endLine);
     if (!ranged.ok) return ranged;
-    return { ok: true, content: ranged.content };
+
+    const estimatedTokens = estimateTextTokens(ranged.content).tokens;
+    const hasLineRange = args.startLine !== undefined || args.endLine !== undefined;
+    let hint: string | undefined;
+    if (
+      !hasLineRange
+      && lineCount >= READ_FILE_HINT_MIN_LINES
+      && estimatedTokens >= READ_FILE_HINT_TOKEN_THRESHOLD
+    ) {
+      hint = `Large file (~${estimatedTokens} est. tokens, ${lineCount} lines). Use startLine/endLine to read a range.`;
+    }
+
+    return {
+      ok: true,
+      content: ranged.content,
+      lines: lineCount,
+      estimatedTokens,
+      ...(hint ? { hint } : {})
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

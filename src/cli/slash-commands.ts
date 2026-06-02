@@ -7,6 +7,7 @@
 
 import type { PlanItem } from '../agent/terminal-agent.js';
 import type { ChatMessage } from '../llm/types.js';
+import { formatContextUsageLines, type ContextUsage } from '../core/token-estimate.js';
 
 /** 单条斜杠命令的定义：名称、描述与可选用法 */
 export interface SlashCommandDefinition {
@@ -95,6 +96,8 @@ export interface SlashCommandContext {
   compactedHistoryMessages?: number;
   maxHistoryMessages?: number;
   maxToolRounds?: number;
+  /** 当前会话上下文 token 估算（由 Agent.getContextUsage 提供） */
+  contextUsage?: ContextUsage;
 }
 
 /**
@@ -185,19 +188,23 @@ export function handleSlashCommand(
   }
 
   if (command === '/status') {
+    const lines = [
+      'HelixCode status:',
+      `cwd: ${context.cwd ?? process.cwd()}`,
+      `model: ${context.model ?? 'unknown'}`,
+      `provider: ${context.provider ?? 'unknown'}`,
+      `history messages: ${context.historyMessages ?? 0}${context.maxHistoryMessages ? ` / ${context.maxHistoryMessages} max` : ''}`,
+      `tool rounds per turn: ${context.maxToolRounds ?? 6}`,
+      `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`
+    ];
+    if (context.contextUsage) {
+      lines.push(...formatContextUsageLines(context.contextUsage));
+    }
     return {
       handled: true,
       exit: false,
       clear: false,
-      output: [
-        'HelixCode status:',
-        `cwd: ${context.cwd ?? process.cwd()}`,
-        `model: ${context.model ?? 'unknown'}`,
-        `provider: ${context.provider ?? 'unknown'}`,
-        `history messages: ${context.historyMessages ?? 0}${context.maxHistoryMessages ? ` / ${context.maxHistoryMessages} max` : ''}`,
-        `tool rounds per turn: ${context.maxToolRounds ?? 6}`,
-        `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`
-      ].join('\n')
+      output: lines.join('\n')
     };
   }
 
@@ -349,6 +356,7 @@ export function formatDoctor(context: SlashCommandContext): string {
     `node: ${process.version}`,
     `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`,
     `history messages: ${context.historyMessages ?? 0}`,
-    `plan items: ${context.planItems?.length ?? 0}`
+    `plan items: ${context.planItems?.length ?? 0}`,
+    ...(context.contextUsage ? formatContextUsageLines(context.contextUsage) : [])
   ].join('\n');
 }

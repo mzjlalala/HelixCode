@@ -3,6 +3,8 @@
  * 描述与 OpenAI 兼容 API 交互时的消息、工具与 Provider 接口
  */
 
+import type { TokenUsage } from './usage.js';
+
 /** 模型返回的单次工具调用 */
 export interface ToolCall {
   id: string;
@@ -22,8 +24,16 @@ export interface ChatMessage {
 
 /** LLM 一次 complete/completeStream 的返回结果 */
 export type ChatResult =
-  | { type: 'text'; content: string; reasoning_content?: string | null }
-  | { type: 'tool_calls'; calls: ToolCall[]; content?: string | null; reasoning_content?: string | null };
+  | { type: 'text'; content: string; reasoning_content?: string | null; usage?: TokenUsage }
+  | {
+      type: 'tool_calls';
+      calls: ToolCall[];
+      content?: string | null;
+      reasoning_content?: string | null;
+      usage?: TokenUsage;
+    };
+
+export type { TokenUsage } from './usage.js';
 
 /** 传给模型的工具 schema（OpenAI function calling 格式） */
 export interface ToolDefinition {

@@ -161,19 +161,26 @@ describe('resolveSessionSettings', () => {
     expect(resolveSessionSettings({})).toEqual({
       maxToolRounds: 6,
       maxHistoryMessages: 80,
-      compactKeepMessages: 20
+      compactKeepMessages: 20,
+      contextTokenLimit: 128_000
     });
+  });
+
+  it('uses lower default context limit for deepseek', () => {
+    expect(resolveSessionSettings({}, 'deepseek').contextTokenLimit).toBe(64_000);
   });
 
   it('applies overrides from .helix/config.json fields', () => {
     expect(resolveSessionSettings({
       maxToolRounds: 12,
       maxHistoryMessages: 50,
-      compactKeepMessages: 10
+      compactKeepMessages: 10,
+      contextTokenLimit: 32_000
     })).toEqual({
       maxToolRounds: 12,
       maxHistoryMessages: 50,
-      compactKeepMessages: 10
+      compactKeepMessages: 10,
+      contextTokenLimit: 32_000
     });
   });
 });

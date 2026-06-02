@@ -8,11 +8,18 @@
  */
 import { classifyShellCommand } from '../tools/shell.js';
 import { createDefaultRegistry, ToolRegistry } from '../tools/registry.js';
-import type { ChatMessage, ChatProvider, ToolCall } from '../llm/types.js';
+import type { ChatMessage, ChatProvider, ChatResult, ToolCall } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
 import type { ProjectInstruction, SessionSettings } from '../core/config.js';
 import { savePlan } from '../core/plan-store.js';
-import { DEFAULT_COMPACT_KEEP_MESSAGES, DEFAULT_MAX_HISTORY_MESSAGES, DEFAULT_MAX_TOOL_ROUNDS } from '../core/constants.js';
+import {
+  DEFAULT_COMPACT_KEEP_MESSAGES,
+  DEFAULT_CONTEXT_TOKEN_LIMIT,
+  DEFAULT_MAX_HISTORY_MESSAGES,
+  DEFAULT_MAX_TOOL_ROUNDS
+} from '../core/constants.js';
+import { buildContextUsage, type ContextUsage } from '../core/token-estimate.js';
+import type { TokenUsage } from '../llm/types.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string; timeline?: TimingEntry[] }
@@ -75,6 +82,12 @@ export class TerminalAgent {
   private readonly registry: ToolRegistry;
   private readonly maxToolRounds: number;
   private readonly maxHistoryMessages: number;
+  /** 模型 context window 参考上限（用于用量估算） */
+  private readonly contextTokenLimit: number;
+  /** 最近一次 LLM 响应的 API usage（DeepSeek/OpenAI） */
+  private lastTokenUsage: TokenUsage | null = null;
+  /** 上次 API 请求时的 history.length + turnMessages.length（与 prompt_tokens 对应） */
+  private lastUsageMessageCount = -1;
 
   constructor(private readonly options: {
     cwd: string;
@@ -92,6 +105,7 @@ export class TerminalAgent {
     this.registry = options.registry ?? createDefaultRegistry();
     this.maxToolRounds = options.session?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     this.maxHistoryMessages = options.session?.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
+    this.contextTokenLimit = options.session?.contextTokenLimit ?? DEFAULT_CONTEXT_TOKEN_LIMIT;
     if (options.initialPlan?.length) {
       this.plan.push(...options.initialPlan.map((item) => ({ ...item })));
     }
@@ -141,6 +155,8 @@ export class TerminalAgent {
 
   clearHistory(): void {
     this.history.splice(0, this.history.length);
+    this.lastTokenUsage = null;
+    this.lastUsageMessageCount = -1;
   }
 
   historySize(): number {
@@ -185,6 +201,23 @@ export class TerminalAgent {
     return this.registry;
   }
 
+  /**
+   * 当前会话上下文用量：优先最近一次 API 的 prompt_tokens（DeepSeek usage），
+   * history 变更后回退为本地估算。
+   */
+  getContextUsage(): ContextUsage {
+    const systemPrompt = buildSystemPrompt(this.options.projectInstructions ?? []);
+    const apiStale = this.lastTokenUsage !== null
+      && this.history.length !== this.lastUsageMessageCount;
+    return buildContextUsage(
+      systemPrompt,
+      this.history,
+      this.contextTokenLimit,
+      this.lastTokenUsage,
+      apiStale
+    );
+  }
+
   // ── 私有运行循环 ──────────────────────────────────────────
 
   /**
@@ -203,6 +236,7 @@ export class TerminalAgent {
     for (let i = 0; i < this.maxToolRounds; i += 1) {
       const llmStart = performance.now();
       const result = await this.getLLMResponse(messages, signal);
+      this.recordTokenUsage(result.usage, this.history.length + turnMessages.length);
 
       this.timeline.record('llm', performance.now() - llmStart);
 
@@ -387,14 +421,18 @@ export class TerminalAgent {
     return null;
   }
 
+  /** 保存 API 返回的 usage（对齐 DeepSeek response.usage） */
+  private recordTokenUsage(usage: TokenUsage | undefined, messageCountAtRequest: number): void {
+    if (!usage) return;
+    this.lastTokenUsage = usage;
+    this.lastUsageMessageCount = messageCountAtRequest;
+  }
+
   /** 调用 LLM；有 onToken 时走流式 completeStream，否则非流式 complete。 */
   private async getLLMResponse(
     messages: ChatMessage[],
     signal?: AbortSignal
-  ): Promise<
-    { type: 'text'; content: string; reasoning_content?: string | null }
-    | { type: 'tool_calls'; calls: ToolCall[]; content?: string | null; reasoning_content?: string | null }
-  > {
+  ): Promise<ChatResult> {
     const definitions = this.registry.getDefinitions();
     if (this.options.onToken && this.options.provider.completeStream) {
       return this.options.provider.completeStream(messages, this.options.onToken, {

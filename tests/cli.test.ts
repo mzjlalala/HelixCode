@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { buildContextUsage } from '../src/core/token-estimate.js';
 import { completeSlashCommand, formatSlashCommandCandidates, handleSlashCommand } from '../src/cli/slash-commands.js';
 import { createDoctorOutput, formatMissingApiKeyMessage, formatOneShotGitSummary, isMainModule, joinPromptArgs, parseMaxTurns } from '../src/cli/main.js';
 
@@ -38,13 +39,17 @@ describe('slash commands', () => {  it('completes slash commands by prefix with 
   it('renders status when context is provided', () => {
     const result = handleSlashCommand('/status', {
       cwd: 'D:/Code/HelixCode',
-      model: 'gpt-test'
+      model: 'gpt-test',
+      contextUsage: buildContextUsage('system', [
+        { role: 'user', content: 'hello' }
+      ], 128_000, { prompt_tokens: 500, completion_tokens: 50, total_tokens: 550 }, false)
     });
 
     expect(result.handled).toBe(true);
     if (result.handled) {
       expect(result.output).toContain('D:/Code/HelixCode');
       expect(result.output).toContain('gpt-test');
+      expect(result.output).toContain('context (API):');
     }
   });
 

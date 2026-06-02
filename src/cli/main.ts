@@ -330,7 +330,8 @@ async function handleInputLine(
     planItems: context.agent.currentPlan(),
     compactedHistoryMessages: context.session.compactKeepMessages,
     maxHistoryMessages: context.session.maxHistoryMessages,
-    maxToolRounds: context.session.maxToolRounds
+    maxToolRounds: context.session.maxToolRounds,
+    contextUsage: context.agent.getContextUsage()
   });
   if (slash.handled) {
     if (slash.model) {
@@ -594,7 +595,7 @@ async function createRuntimeContext(
   }
 
   const fileConfig = await loadFileConfig(config.cwd);
-  const session = resolveSessionSettings(fileConfig);
+  const session = resolveSessionSettings(fileConfig, config.provider);
   if (runtimeOpts.maxToolRounds) {
     session.maxToolRounds = runtimeOpts.maxToolRounds;
   }

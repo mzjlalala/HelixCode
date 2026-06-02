@@ -12,6 +12,15 @@ export const DEFAULT_COMPACT_KEEP_MESSAGES = 20;
 /** 单次 agent.run() 允许的最大工具调用轮次 */
 export const DEFAULT_MAX_TOOL_ROUNDS = 6;
 
+/** 默认模型 context window 参考上限（token，可被 .helix/config.json 覆盖） */
+export const DEFAULT_CONTEXT_TOKEN_LIMIT = 128_000;
+
+/** read_file 无行范围且估算 token 超过此值时附加提示 */
+export const READ_FILE_HINT_TOKEN_THRESHOLD = 6_000;
+
+/** 触发大文件提示的最小行数（避免短文件误报） */
+export const READ_FILE_HINT_MIN_LINES = 150;
+
 /** 超过此大小的文件在 search_files 中跳过（字节） */
 export const MAX_SEARCH_FILE_BYTES = 512 * 1024;
 

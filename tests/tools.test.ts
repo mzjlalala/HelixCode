@@ -40,6 +40,21 @@ describe('filesystem tools', () => {
     if (result.ok) expect(result.content).toBe('two\nthree\n');
   });
 
+  it('hints when reading a large file without a line range', async () => {
+    const cwd = await makeProject();
+    const line = `${'x'.repeat(200)}\n`;
+    await writeFile(join(cwd, 'big.txt'), line.repeat(160), 'utf8');
+
+    const result = await readFileTool(cwd, { path: 'big.txt' });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.lines).toBeGreaterThanOrEqual(150);
+      expect(result.estimatedTokens).toBeGreaterThanOrEqual(6000);
+      expect(result.hint).toMatch(/startLine\/endLine/i);
+    }
+  });
+
   it('rejects path traversal', async () => {
     const cwd = await makeProject();
 
