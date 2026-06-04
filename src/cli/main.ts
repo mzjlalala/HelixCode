@@ -17,7 +17,7 @@ import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, resolveSessionSettings, savePermissionMode, type SessionSettings } from '../core/config.js';
+import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, mergeFileConfig, resolveSessionSettings, savePermissionMode, type SessionSettings } from '../core/config.js';
 import { loadHistory, saveHistory } from '../core/history-store.js';
 import { loadPlan } from '../core/plan-store.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
@@ -336,6 +336,8 @@ async function handleInputLine(
   if (slash.handled) {
     if (slash.model) {
       context.runtime.model = slash.model;
+      context.agent.setActiveModel(slash.model);
+      context.session.contextTokenLimit = context.agent.getContextTokenLimit();
     }
     if (slash.cycleMode) {
       currentMode = cycleMode(currentMode);
@@ -595,7 +597,8 @@ async function createRuntimeContext(
   }
 
   const fileConfig = await loadFileConfig(config.cwd);
-  const session = resolveSessionSettings(fileConfig, config.provider);
+  mergeFileConfig(config, fileConfig);
+  const session = resolveSessionSettings(fileConfig, config.provider, config.model);
   if (runtimeOpts.maxToolRounds) {
     session.maxToolRounds = runtimeOpts.maxToolRounds;
   }
@@ -612,6 +615,16 @@ async function createRuntimeContext(
     projectInstructions,
     session,
     initialPlan,
+    initialModel: runtime.model,
+    llmProvider: config.provider,
+    contextLimits: {
+      ...(fileConfig.contextTokenLimit !== undefined
+        ? { contextTokenLimit: fileConfig.contextTokenLimit }
+        : {}),
+      ...(fileConfig.modelContextLimits !== undefined
+        ? { modelContextLimits: fileConfig.modelContextLimits }
+        : {})
+    },
     // 流式 token：停止 spinner，与 reasoning 输出互斥换行
     onToken: (token) => {
       stopTimerAndFreeze();

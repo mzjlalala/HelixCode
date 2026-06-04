@@ -10,10 +10,10 @@ import { resolve, dirname } from 'node:path';
 import type { PermissionMode } from '../cli/permission-mode.js';
 import {
   DEFAULT_COMPACT_KEEP_MESSAGES,
-  DEFAULT_CONTEXT_TOKEN_LIMIT,
   DEFAULT_MAX_HISTORY_MESSAGES,
   DEFAULT_MAX_TOOL_ROUNDS
 } from './constants.js';
+import { resolveContextTokenLimit } from './model-context-limits.js';
 
 export type LlmProvider = 'openai' | 'deepseek' | 'custom';
 
@@ -39,8 +39,10 @@ export interface HelixFileConfig {
   maxHistoryMessages?: number;
   /** Default /compact keep count (default 20). */
   compactKeepMessages?: number;
-  /** 模型 context window 参考上限（token 估算用） */
+  /** 全局 context 上限 fallback（当前模型未出现在 modelContextLimits 时使用） */
   contextTokenLimit?: number;
+  /** 按模型名配置 context 上限，/model 切换时自动匹配 */
+  modelContextLimits?: Record<string, number>;
 }
 
 export interface SessionSettings {
@@ -53,16 +55,14 @@ export interface SessionSettings {
 /** 将 `.helix/config.json` 中的会话限制字段解析为带默认值的 SessionSettings。 */
 export function resolveSessionSettings(
   file: HelixFileConfig = {},
-  provider: LlmProvider = 'openai'
+  provider: LlmProvider = 'openai',
+  model = ''
 ): SessionSettings {
   return {
     maxToolRounds: positiveInt(file.maxToolRounds, DEFAULT_MAX_TOOL_ROUNDS),
     maxHistoryMessages: positiveInt(file.maxHistoryMessages, DEFAULT_MAX_HISTORY_MESSAGES),
     compactKeepMessages: positiveInt(file.compactKeepMessages, DEFAULT_COMPACT_KEEP_MESSAGES),
-    contextTokenLimit: positiveInt(
-      file.contextTokenLimit,
-      provider === 'deepseek' ? 64_000 : DEFAULT_CONTEXT_TOKEN_LIMIT
-    )
+    contextTokenLimit: resolveContextTokenLimit(model || file.model || '', file, provider)
   };
 }
 

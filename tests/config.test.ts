@@ -166,8 +166,14 @@ describe('resolveSessionSettings', () => {
     });
   });
 
-  it('uses lower default context limit for deepseek', () => {
+  it('uses lower default context limit for deepseek without a known model', () => {
     expect(resolveSessionSettings({}, 'deepseek').contextTokenLimit).toBe(64_000);
+  });
+
+  it('uses modelContextLimits for known model', () => {
+    expect(resolveSessionSettings({
+      modelContextLimits: { 'deepseek-v4-pro': 1_000_000 }
+    }, 'deepseek', 'deepseek-v4-pro').contextTokenLimit).toBe(1_000_000);
   });
 
   it('applies overrides from .helix/config.json fields', () => {
@@ -175,11 +181,23 @@ describe('resolveSessionSettings', () => {
       maxToolRounds: 12,
       maxHistoryMessages: 50,
       compactKeepMessages: 10,
-      contextTokenLimit: 32_000
-    })).toEqual({
+      contextTokenLimit: 32_000,
+      modelContextLimits: { 'my-model': 256_000 }
+    }, 'openai', 'my-model')).toEqual({
       maxToolRounds: 12,
       maxHistoryMessages: 50,
       compactKeepMessages: 10,
+      contextTokenLimit: 256_000
+    });
+  });
+
+  it('applies global contextTokenLimit when model is unknown', () => {
+    expect(resolveSessionSettings({
+      contextTokenLimit: 32_000
+    }, 'openai', 'unknown')).toEqual({
+      maxToolRounds: 6,
+      maxHistoryMessages: 80,
+      compactKeepMessages: 20,
       contextTokenLimit: 32_000
     });
   });

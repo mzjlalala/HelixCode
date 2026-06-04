@@ -10,11 +10,11 @@ import { classifyShellCommand } from '../tools/shell.js';
 import { createDefaultRegistry, ToolRegistry } from '../tools/registry.js';
 import type { ChatMessage, ChatProvider, ChatResult, ToolCall } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
-import type { ProjectInstruction, SessionSettings } from '../core/config.js';
+import type { ProjectInstruction, SessionSettings, HelixFileConfig, LlmProvider } from '../core/config.js';
+import { resolveContextTokenLimit } from '../core/model-context-limits.js';
 import { savePlan } from '../core/plan-store.js';
 import {
   DEFAULT_COMPACT_KEEP_MESSAGES,
-  DEFAULT_CONTEXT_TOKEN_LIMIT,
   DEFAULT_MAX_HISTORY_MESSAGES,
   DEFAULT_MAX_TOOL_ROUNDS
 } from '../core/constants.js';
@@ -82,8 +82,11 @@ export class TerminalAgent {
   private readonly registry: ToolRegistry;
   private readonly maxToolRounds: number;
   private readonly maxHistoryMessages: number;
-  /** 模型 context window 参考上限（用于用量估算） */
-  private readonly contextTokenLimit: number;
+  /** 当前模型对应的 context 上限（随 /model 切换更新） */
+  private contextTokenLimit: number;
+  private activeModel: string;
+  private readonly contextLimitFile: Pick<HelixFileConfig, 'contextTokenLimit' | 'modelContextLimits'>;
+  private readonly llmProvider: LlmProvider;
   /** 最近一次 LLM 响应的 API usage（DeepSeek/OpenAI） */
   private lastTokenUsage: TokenUsage | null = null;
   /** 上次 API 请求时的 history.length + turnMessages.length（与 prompt_tokens 对应） */
@@ -101,11 +104,24 @@ export class TerminalAgent {
     session?: SessionSettings;
     /** Restored plan items from .helix/plan.json */
     initialPlan?: PlanItem[];
+    /** 当前 chat 模型（用于按模型解析 context 上限） */
+    initialModel?: string;
+    /** LLM provider，context 默认值回退用 */
+    llmProvider?: LlmProvider;
+    /** .helix/config.json 中的 context 相关字段 */
+    contextLimits?: Pick<HelixFileConfig, 'contextTokenLimit' | 'modelContextLimits'>;
   }) {
     this.registry = options.registry ?? createDefaultRegistry();
     this.maxToolRounds = options.session?.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     this.maxHistoryMessages = options.session?.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
-    this.contextTokenLimit = options.session?.contextTokenLimit ?? DEFAULT_CONTEXT_TOKEN_LIMIT;
+    this.contextLimitFile = options.contextLimits ?? {};
+    this.llmProvider = options.llmProvider ?? 'openai';
+    this.activeModel = options.initialModel ?? '';
+    this.contextTokenLimit = resolveContextTokenLimit(
+      this.activeModel,
+      this.contextLimitFile,
+      this.llmProvider
+    );
     if (options.initialPlan?.length) {
       this.plan.push(...options.initialPlan.map((item) => ({ ...item })));
     }
@@ -151,6 +167,21 @@ export class TerminalAgent {
         tool_call_id: confirmation.tool_call_id
       }
     ]);
+  }
+
+  /** 供 /model 切换后更新 context 上限 */
+  setActiveModel(model: string): void {
+    this.activeModel = model;
+    this.contextTokenLimit = resolveContextTokenLimit(
+      model,
+      this.contextLimitFile,
+      this.llmProvider
+    );
+  }
+
+  /** 当前生效的 context token 上限 */
+  getContextTokenLimit(): number {
+    return this.contextTokenLimit;
   }
 
   clearHistory(): void {
