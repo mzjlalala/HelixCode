@@ -1,0 +1,12 @@
+{
+  "model": "deepseek-v4-pro",
+  "modelContextLimits": {
+    "deepseek-v4-pro": 1000000,
+    "deepseek-v4-flash": 128000,
+    "deepseek-chat": 64000,
+    "deepseek-reasoner": 64000,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000
+  },
+  "contextTokenLimit": 128000
+}
