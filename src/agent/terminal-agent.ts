@@ -486,7 +486,7 @@ export class TerminalAgent {
       role: 'assistant',
       content: assistantContent,
       tool_calls: batchCalls,
-      reasoning_content: reasoningContent
+      reasoning_content: reasoningContent ?? '',
     });
 
     const safeCalls = calls.slice(0, stopReason === null ? calls.length : stopIndex);
@@ -610,6 +610,9 @@ export class TerminalAgent {
     this.history.push(...messages);
     if (this.history.length > this.maxHistoryMessages) {
       this.history.splice(0, this.history.length - this.maxHistoryMessages);
+      while (this.history.length > 0 && this.history[0]?.role === 'tool') {
+        this.history.shift();
+      }
     }
   }
 }

@@ -31,6 +31,7 @@ interface StreamDelta {
  */
 class StreamAccumulator {
   fullContent = '';
+  fullReasoning = '';
   /** 流式末 chunk 的 usage（需 stream_options.include_usage） */
   usage?: TokenUsage;
   private hasToolCalls = false;
@@ -44,6 +45,7 @@ class StreamAccumulator {
 
   addReasoning(text: string, onReasoning?: (t: string) => void): void {
     onReasoning?.(text);
+    this.fullReasoning += text;
   }
 
   /** 处理单个 SSE delta，分发到 content / reasoning / tool_calls 分支。 */
@@ -111,12 +113,20 @@ class StreamAccumulator {
         .filter((tc) => tc.id && tc.name);
       if (toolCalls.length > 0) {
         return withUsage(
-          { type: 'tool_calls', calls: toolCalls, content: this.fullContent || null },
+          {
+            type: 'tool_calls',
+            calls: toolCalls,
+            content: this.fullContent || null,
+            reasoning_content: this.fullReasoning || null,
+          },
           this.usage
         );
       }
     }
-    return withUsage({ type: 'text', content: this.fullContent }, this.usage);
+    return withUsage(
+      { type: 'text', content: this.fullContent, reasoning_content: this.fullReasoning || null },
+      this.usage
+    );
   }
 }
 
@@ -146,7 +156,7 @@ function buildRequestBody(
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: runtime.model,
-    messages: messages.map(serializeMessage),
+    messages: messages.map((msg) => serializeMessage(msg, config)),
     temperature: 0.2
   };
   if (stream) {
@@ -158,14 +168,21 @@ function buildRequestBody(
     body.tools = buildOpenAITools(tools);
     body.tool_choice = 'auto';
   }
-  if (config.provider === 'deepseek') {
+  if (needsDeepSeekThinkingReplay(config)) {
     body.thinking = { type: 'enabled' };
   }
   return body;
 }
 
+/** DeepSeek 思考模式重放历史时，assistant 必须带 reasoning_content（可为空串） */
+export function needsDeepSeekThinkingReplay(config: HelixConfig): boolean {
+  if (config.provider === 'deepseek') return true;
+  if (config.baseURL.toLowerCase().includes('deepseek.com')) return true;
+  return false;
+}
+
 /** 将内部 ChatMessage 序列化为 OpenAI API 消息格式。 */
-function serializeMessage(msg: ChatMessage): Record<string, unknown> {
+function serializeMessage(msg: ChatMessage, config: HelixConfig): Record<string, unknown> {
   const m: Record<string, unknown> = { role: msg.role, content: msg.content ?? null };
 
   if (msg.role === 'assistant') {
@@ -176,7 +193,10 @@ function serializeMessage(msg: ChatMessage): Record<string, unknown> {
         function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
       }));
     }
-    if (msg.reasoning_content) {
+    if (needsDeepSeekThinkingReplay(config)) {
+      // DeepSeek 思考模式 + 工具调用：重放时缺少该字段会 400
+      m.reasoning_content = msg.reasoning_content ?? '';
+    } else if (msg.reasoning_content) {
       m.reasoning_content = msg.reasoning_content;
     }
   }
@@ -408,29 +428,9 @@ export class OpenAIChatProvider implements ChatProvider {
 
 // ── 消息序列化（供外部消费者导出） ─────────────────────────────
 
-export function toOpenAIMessages(messages: ChatMessage[]): Record<string, unknown>[] {
-  return messages.map((msg): Record<string, unknown> => {
-    if (msg.role === 'tool') {
-      return {
-        role: 'tool',
-        content: msg.content ?? '',
-        tool_call_id: msg.tool_call_id ?? ''
-      };
-    }
-    if (msg.role === 'assistant') {
-      const m: Record<string, unknown> = { role: 'assistant', content: msg.content };
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        m.tool_calls = msg.tool_calls.map((tc) => ({
-          id: tc.id,
-          type: 'function' as const,
-          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
-        }));
-      }
-      if (msg.reasoning_content) {
-        m.reasoning_content = msg.reasoning_content;
-      }
-      return m;
-    }
-    return { role: msg.role, content: msg.content ?? '' };
-  });
+export function toOpenAIMessages(
+  messages: ChatMessage[],
+  config: HelixConfig
+): Record<string, unknown>[] {
+  return messages.map((msg) => serializeMessage(msg, config));
 }

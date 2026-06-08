@@ -129,6 +129,69 @@ describe('OpenAIChatProvider', () => {
     vi.unstubAllGlobals();
   });
 
+  it('includes empty reasoning_content for DeepSeek assistant tool_calls replay', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { content: 'ok' } }]
+      })
+    }));
+
+    const provider = new OpenAIChatProvider(config({ model: 'deepseek-v4-flash' }));
+    await provider.complete([
+      { role: 'user', content: 'first' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'call_1', name: 'web_fetch', arguments: { url: 'https://example.com' } }],
+      },
+      { role: 'tool', content: '{"ok":true}', tool_call_id: 'call_1' },
+      { role: 'user', content: 'second question' },
+    ]);
+
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[0]![1] as RequestInit).body as string) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    const assistantWithTools = body.messages.find(
+      (m) => m.role === 'assistant' && Array.isArray(m.tool_calls)
+    );
+    expect(assistantWithTools?.reasoning_content).toBe('');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('accumulates reasoning_content from stream and returns it with tool_calls', async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[{"delta":{"reasoning_content":"think "}}]}\n\n'
+        ));
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[{"delta":{"reasoning_content":"step"}}]}\n\n'
+        ));
+        controller.enqueue(encoder.encode(
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"web_search","arguments":"{\\"query\\":\\"test\\"}"}}]}}]}\n\n'
+        ));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      }
+    });
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, body: stream }));
+
+    const provider = new OpenAIChatProvider(config());
+    const result = await provider.completeStream([{ role: 'user', content: 'search' }], () => {});
+
+    expect(result.type).toBe('tool_calls');
+    if (result.type === 'tool_calls') {
+      expect(result.reasoning_content).toBe('think step');
+      expect(result.calls[0]?.name).toBe('web_search');
+    }
+
+    vi.unstubAllGlobals();
+  });
+
   it('requests stream_options.include_usage when streaming', async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
