@@ -9,8 +9,8 @@ export const DEFAULT_MAX_HISTORY_MESSAGES = 80;
 /** /compact 命令默认保留的消息条数 */
 export const DEFAULT_COMPACT_KEEP_MESSAGES = 20;
 
-/** 单次 agent.run() 允许的最大工具调用轮次 */
-export const DEFAULT_MAX_TOOL_ROUNDS = 6;
+/** 单次 agent.run() 允许的最大工具调用轮次（每轮 = 一次 LLM 响应，可含多个并行安全工具） */
+export const DEFAULT_MAX_TOOL_ROUNDS = 12;
 
 /** 默认模型 context window 参考上限（token，可被 .helix/config.json 覆盖） */
 export const DEFAULT_CONTEXT_TOKEN_LIMIT = 128_000;

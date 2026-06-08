@@ -159,7 +159,7 @@ describe('config file (.helix/config.json)', () => {
 describe('resolveSessionSettings', () => {
   it('uses defaults when file config omits session fields', () => {
     expect(resolveSessionSettings({})).toEqual({
-      maxToolRounds: 6,
+      maxToolRounds: 12,
       maxHistoryMessages: 80,
       compactKeepMessages: 20,
       contextTokenLimit: 128_000
@@ -195,7 +195,7 @@ describe('resolveSessionSettings', () => {
     expect(resolveSessionSettings({
       contextTokenLimit: 32_000
     }, 'openai', 'unknown')).toEqual({
-      maxToolRounds: 6,
+      maxToolRounds: 12,
       maxHistoryMessages: 80,
       compactKeepMessages: 20,
       contextTokenLimit: 32_000

@@ -376,8 +376,65 @@ export class TerminalAgent {
       );
     }
 
+    const message = await this.synthesizeFinalAnswer(turnMessages, signal);
     this.appendHistory(turnMessages);
-    return { type: 'final', message: 'HelixCode stopped after too many tool rounds.', timeline: this.timeline.snapshot() };
+    return {
+      type: 'final',
+      message,
+      timeline: this.timeline.snapshot(),
+    };
+  }
+
+  /**
+   * 工具轮次用尽时，无 tools 再调一次 LLM，根据已收集的 tool 结果汇总回答。
+   */
+  private async synthesizeFinalAnswer(
+    turnMessages: ChatMessage[],
+    signal?: AbortSignal
+  ): Promise<string> {
+    const nudge: ChatMessage = {
+      role: 'user',
+      content:
+        '[System] Maximum tool rounds reached for this turn. Using all information gathered above, give the most complete answer possible to the user\'s request. Clearly state anything that could not be verified. Do NOT call any more tools.',
+    };
+    turnMessages.push(nudge);
+
+    const messages: ChatMessage[] = [
+      { role: 'system', content: buildSystemPrompt(this.options.projectInstructions ?? []) },
+      ...this.history,
+      ...turnMessages,
+    ];
+
+    try {
+      const llmStart = performance.now();
+      const result = await this.getLLMResponseWithoutTools(messages, signal);
+      this.timeline.record('llm', performance.now() - llmStart);
+
+      const body =
+        result.type === 'text'
+          ? result.content
+          : 'Unable to finish research within the tool round limit. Try a narrower question or increase maxToolRounds in .helix/config.json.';
+
+      turnMessages.push({ role: 'assistant', content: body });
+      return `${body}\n\n(Note: tool round limit reached; answer synthesized from collected search/fetch results. Increase maxToolRounds in .helix/config.json if you need deeper research.)`;
+    } catch {
+      return 'HelixCode stopped after too many tool rounds. Partial results are in the conversation above. Increase maxToolRounds in .helix/config.json or ask a narrower question.';
+    }
+  }
+
+  /** 无 tools 的 LLM 调用（用于轮次用尽后的汇总） */
+  private async getLLMResponseWithoutTools(
+    messages: ChatMessage[],
+    signal?: AbortSignal
+  ): Promise<ChatResult> {
+    this.options.onLlmRoundStart?.();
+    if (this.options.onToken && this.options.provider.completeStream) {
+      return this.options.provider.completeStream(messages, this.options.onToken, {
+        ...(signal ? { signal } : {}),
+        ...(this.options.onReasoning ? { onReasoning: this.options.onReasoning } : {}),
+      });
+    }
+    return this.options.provider.complete(messages);
   }
 
   /**
@@ -583,7 +640,10 @@ export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): st
     '  Write naturally and comprehensively. Long-form content is fine.',
     '  For long essays or documents, you can use write_file to save the output to a file.',
     '  Use web_search for topics you are unsure about. Use the user language in queries (Chinese for 中文 topics).',
-    '  Read search snippets before searching again. Do NOT repeat the same query; if duplicateQuery or noResults, answer from prior results or say unavailable.',
+    '  Research efficiently: at most 3 different web_search queries, then answer from snippets; use web_fetch on the best URL.',
+    '  If web_fetch returns empty, pick another URL from search results — do not repeat the same search.',
+    '  Always deliver a useful answer from what you have; never stop without replying to the user.',
+    '  Read search snippets before searching again. Do NOT repeat the same query; if duplicateQuery or noResults, rephrase once then answer.',
     '',
     'For CODING tasks (projects, codebases, files):',
     '  Start by exploring with read_file, search_files, or list_files.',

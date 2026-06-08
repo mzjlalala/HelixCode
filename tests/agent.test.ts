@@ -349,4 +349,38 @@ describe('TerminalAgent', () => {  it('builds a versatile system prompt for gene
     assertToolCallHistoryValid(agent.getHistory());
     expect(provider.calls.length).toBe(3);
   });
+
+  it('synthesizes an answer when tool rounds are exhausted', async () => {
+    let llmCalls = 0;
+    const provider: ChatProvider = {
+      async complete(_messages, tools?) {
+        llmCalls += 1;
+        if (!tools || tools.length === 0) {
+          return { type: 'text', content: 'Synthesized from collected snippets.' };
+        }
+        return {
+          type: 'tool_calls',
+          calls: [{ id: 'c1', name: 'web_search', arguments: { query: 'world cup groups' } }],
+        };
+      },
+    };
+    const agent = new TerminalAgent({
+      cwd: process.cwd(),
+      provider,
+      session: {
+        maxToolRounds: 2,
+        maxHistoryMessages: 80,
+        compactKeepMessages: 20,
+        contextTokenLimit: 128_000,
+      },
+    });
+
+    const result = await agent.run('research world cup groups');
+    expect(result.type).toBe('final');
+    if (result.type === 'final') {
+      expect(result.message).toContain('Synthesized from collected snippets');
+      expect(result.message).toContain('tool round limit');
+    }
+    expect(llmCalls).toBeGreaterThanOrEqual(3);
+  });
 });

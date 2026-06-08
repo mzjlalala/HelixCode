@@ -8,5 +8,7 @@
     "gpt-4o": 128000,
     "gpt-4o-mini": 128000
   },
-  "contextTokenLimit": 128000
+  "contextTokenLimit": 128000,
+  "maxToolRounds": 12,
+  "maxHistoryMessages": 80
 }
