@@ -92,6 +92,8 @@ export class TerminalAgent {
   private lastTokenUsage: TokenUsage | null = null;
   /** 上次 API 请求时的 history.length + turnMessages.length（与 prompt_tokens 对应） */
   private lastUsageMessageCount = -1;
+  /** 待确认工具：本轮未完成的 assistant+tool 前缀（不可写入 history 直到确认） */
+  private pendingTurnMessages: ChatMessage[] | null = null;
 
   constructor(private readonly options: {
     cwd: string;
@@ -146,34 +148,42 @@ export class TerminalAgent {
     confirmation: Extract<AgentTurnResult, { type: 'confirmation' }>,
     result: ConfirmedToolResult
   ): Promise<AgentTurnResult> {
-    return this.completeTurn([
-      {
-        role: 'tool',
-        content: JSON.stringify({
-          confirmedTool: confirmation.tool,
-          args: confirmation.args,
-          result
-        }),
-        tool_call_id: confirmation.tool_call_id
-      }
-    ]);
+    const toolMsg: ChatMessage = {
+      role: 'tool',
+      content: JSON.stringify({
+        confirmedTool: confirmation.tool,
+        args: confirmation.args,
+        result
+      }),
+      tool_call_id: confirmation.tool_call_id
+    };
+    if (this.pendingTurnMessages) {
+      const turnMessages = [...this.pendingTurnMessages, toolMsg];
+      this.pendingTurnMessages = null;
+      return this.completeTurn(turnMessages);
+    }
+    return this.completeTurn([toolMsg]);
   }
 
   /** 用户跳过确认时，将拒绝结果写入历史，避免 LLM 重复请求同一操作。 */
   recordSkippedConfirmation(
     confirmation: Extract<AgentTurnResult, { type: 'confirmation' }>
   ): void {
-    this.appendHistory([
-      {
-        role: 'tool',
-        content: JSON.stringify({
-          confirmedTool: confirmation.tool,
-          args: confirmation.args,
-          result: { ok: false, error: 'User skipped this action.' }
-        }),
-        tool_call_id: confirmation.tool_call_id
-      }
-    ]);
+    const toolMsg: ChatMessage = {
+      role: 'tool',
+      content: JSON.stringify({
+        confirmedTool: confirmation.tool,
+        args: confirmation.args,
+        result: { ok: false, error: 'User skipped this action.' }
+      }),
+      tool_call_id: confirmation.tool_call_id
+    };
+    if (this.pendingTurnMessages) {
+      this.appendHistory([...this.pendingTurnMessages, toolMsg]);
+      this.pendingTurnMessages = null;
+      return;
+    }
+    this.appendHistory([toolMsg]);
   }
 
   /** 供 /model 切换后更新 context 上限 */
@@ -195,6 +205,7 @@ export class TerminalAgent {
     this.history.splice(0, this.history.length);
     this.lastTokenUsage = null;
     this.lastUsageMessageCount = -1;
+    this.pendingTurnMessages = null;
   }
 
   historySize(): number {
@@ -355,8 +366,8 @@ export class TerminalAgent {
   /**
    * 处理一批原生 tool_calls。
    *
-   * 策略：从左到右扫描，遇到需确认或 shell 风险工具前，先将前缀中的「安全工具」并行执行；
-   * 遇 block 直接终局，遇 confirm 返回 confirmation，全部安全则返回 null 继续 LLM 循环。
+   * OpenAI/DeepSeek 要求：一条 assistant（含 tool_calls 数组）后紧跟每条 call 的 tool 消息。
+   * 策略：从左到右扫描，遇到需确认或 shell 风险工具前，先将前缀中的「安全工具」并行执行。
    */
   private async handleToolCallsBatch(
     calls: ToolCall[],
@@ -373,13 +384,6 @@ export class TerminalAgent {
     // 扫描：确定首个需暂停的位置（确认 / 拦截）
     for (let idx = 0; idx < calls.length; idx += 1) {
       const call = calls[idx]!;
-      // 每个 tool_call 单独一条 assistant 消息（与 OpenAI 多 call 格式一致）
-      turnMessages.push({
-        role: 'assistant',
-        content: assistantContent,
-        tool_calls: [call],
-        reasoning_content: reasoningContent
-      });
 
       if (this.registry.hasShellRisk(call.name)) {
         const command = String(call.arguments.command ?? '').trim();
@@ -402,7 +406,15 @@ export class TerminalAgent {
       }
     }
 
-    // stopReason 为 null 表示整批均可并行执行
+    // 单条 assistant 携带本批 tool_calls（API 格式要求，不可拆成多条 assistant）
+    const batchCalls = calls.slice(0, stopReason === null ? calls.length : stopIndex + 1);
+    turnMessages.push({
+      role: 'assistant',
+      content: assistantContent,
+      tool_calls: batchCalls,
+      reasoning_content: reasoningContent
+    });
+
     const safeCalls = calls.slice(0, stopReason === null ? calls.length : stopIndex);
 
     if (signal?.aborted && safeCalls.length > 0) {
@@ -437,7 +449,8 @@ export class TerminalAgent {
 
     if (stopReason === 'confirm') {
       const pending = calls[stopIndex]!;
-      this.appendHistory(turnMessages);
+      // 待确认：assistant 已写入 turnMessages，但 pending 的 tool 尚未响应，不可持久化到 history
+      this.pendingTurnMessages = [...turnMessages];
       return {
         type: 'confirmation',
         tool: pending.name,

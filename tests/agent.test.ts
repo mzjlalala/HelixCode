@@ -41,6 +41,48 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** 模拟单次响应返回多个 tool_calls 的 Provider */
+class BatchToolProvider implements ChatProvider {
+  readonly calls: ChatMessage[][] = [];
+  private round = 0;
+
+  constructor(private readonly batchCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>) {}
+
+  async complete(messages: ChatMessage[]): Promise<ChatResult> {
+    this.calls.push(messages);
+    this.round += 1;
+    if (this.round === 1) {
+      return { type: 'tool_calls', calls: this.batchCalls };
+    }
+    return { type: 'text', content: `done round ${this.round}` };
+  }
+}
+
+/** 校验 history 中 assistant tool_calls 与 tool 消息成对 */
+function assertToolCallHistoryValid(messages: ChatMessage[]): void {
+  let pendingIds: string[] | null = null;
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && msg.tool_calls?.length) {
+      if (pendingIds?.length) {
+        throw new Error('assistant tool_calls without matching tool responses');
+      }
+      pendingIds = msg.tool_calls.map((tc) => tc.id);
+      continue;
+    }
+    if (msg.role === 'tool') {
+      if (!pendingIds?.length) throw new Error('orphan tool message');
+      const id = msg.tool_call_id ?? '';
+      const idx = pendingIds.indexOf(id);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      pendingIds.splice(idx, 1);
+      if (pendingIds.length === 0) pendingIds = null;
+    }
+  }
+  if (pendingIds?.length) {
+    throw new Error(`unanswered tool_calls: ${pendingIds.join(', ')}`);
+  }
+}
+
 describe('TerminalAgent', () => {  it('builds a versatile system prompt for general and coding tasks', () => {
     const prompt = buildSystemPrompt([]);
 
@@ -278,5 +320,33 @@ describe('TerminalAgent', () => {  it('builds a versatile system prompt for gene
     // Mutating the copy should not affect internal state
     copy.push({ role: 'assistant', content: 'added' });
     expect(agent.getHistory()).toHaveLength(1);
+  });
+
+  it('keeps one assistant message for multiple parallel tool_calls', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'helix-agent-'));
+    await writeFile(join(cwd, 'a.txt'), 'alpha\n', 'utf8');
+    await writeFile(join(cwd, 'b.txt'), 'beta\n', 'utf8');
+    await writeFile(join(cwd, 'c.txt'), 'gamma\n', 'utf8');
+
+    const provider = new BatchToolProvider([
+      { id: 'call_a', name: 'read_file', arguments: { path: 'a.txt' } },
+      { id: 'call_b', name: 'read_file', arguments: { path: 'b.txt' } },
+      { id: 'call_c', name: 'read_file', arguments: { path: 'c.txt' } }
+    ]);
+    const agent = new TerminalAgent({ cwd, provider });
+
+    const first = await agent.run('read three files');
+    expect(first.type).toBe('final');
+    assertToolCallHistoryValid(agent.getHistory());
+
+    const batchAssistant = agent.getHistory().find(
+      (m) => m.role === 'assistant' && (m.tool_calls?.length ?? 0) === 3
+    );
+    expect(batchAssistant).toBeTruthy();
+
+    const second = await agent.run('continue');
+    expect(second.type).toBe('final');
+    assertToolCallHistoryValid(agent.getHistory());
+    expect(provider.calls.length).toBe(3);
   });
 });
