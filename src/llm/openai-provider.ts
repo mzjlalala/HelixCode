@@ -47,7 +47,17 @@ class StreamAccumulator {
   }
 
   /** 处理单个 SSE delta，分发到 content / reasoning / tool_calls 分支。 */
-  addDelta(delta: StreamDelta, onToken: (t: string) => void, onReasoning?: (t: string) => void): void {
+  addDelta(
+    delta: StreamDelta,
+    onToken: (t: string) => void,
+    onReasoning?: (t: string) => void,
+    onToolCallDelta?: (event: {
+      index: number;
+      name?: string;
+      argumentsDelta: string;
+      argumentsSoFar: string;
+    }) => void
+  ): void {
     if (delta.reasoning_content) {
       this.addReasoning(delta.reasoning_content, onReasoning);
     }
@@ -60,8 +70,23 @@ class StreamAccumulator {
         const existing = this.calls.get(tc.index) ?? { id: '', name: '', args: '' };
         if (tc.id) existing.id = tc.id;
         if (tc.function?.name) existing.name = tc.function.name;
-        // arguments 在流式响应中可能分多次追加
-        if (tc.function?.arguments) existing.args += tc.function.arguments;
+        if (tc.function?.arguments) {
+          existing.args += tc.function.arguments;
+          const payload = {
+            index: tc.index,
+            argumentsDelta: tc.function.arguments,
+            argumentsSoFar: existing.args
+          };
+          const toolName = existing.name || tc.function.name;
+          onToolCallDelta?.(toolName ? { ...payload, name: toolName } : payload);
+        } else if (tc.function?.name && existing.name) {
+          onToolCallDelta?.({
+            index: tc.index,
+            name: existing.name,
+            argumentsDelta: '',
+            argumentsSoFar: existing.args
+          });
+        }
         this.calls.set(tc.index, existing);
       }
     }
@@ -259,7 +284,13 @@ async function fetchCompleteStream(
   onToken: (token: string) => void,
   onReasoning?: (text: string) => void,
   tools?: ToolDefinition[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onToolCallDelta?: (event: {
+    index: number;
+    name?: string;
+    argumentsDelta: string;
+    argumentsSoFar: string;
+  }) => void
 ): Promise<ChatResult> {
   const body = buildRequestBody(config, runtime, messages, tools, true);
 
@@ -309,7 +340,7 @@ async function fetchCompleteStream(
             };
             if (chunk.usage) acc.setUsage(chunk.usage);
             const delta = chunk.choices?.[0]?.delta;
-            if (delta) acc.addDelta(delta, onToken, onReasoning);
+            if (delta) acc.addDelta(delta, onToken, onReasoning, onToolCallDelta);
           } catch {
             // 跳过格式错误的 SSE 行
           }
@@ -353,14 +384,24 @@ export class OpenAIChatProvider implements ChatProvider {
   async completeStream(
     messages: ChatMessage[],
     onToken: (token: string) => void,
-    options?: { signal?: AbortSignal; tools?: ToolDefinition[]; onReasoning?: (text: string) => void }
+    options?: {
+      signal?: AbortSignal;
+      tools?: ToolDefinition[];
+      onReasoning?: (text: string) => void;
+      onToolCallDelta?: (event: {
+        index: number;
+        name?: string;
+        argumentsDelta: string;
+        argumentsSoFar: string;
+      }) => void;
+    }
   ): Promise<ChatResult> {
     if (!this.config.apiKey.trim()) {
       return { type: 'text', content: 'API key is not set.' };
     }
     return fetchCompleteStream(
       this.config, this.runtime, messages, onToken,
-      options?.onReasoning, options?.tools, options?.signal
+      options?.onReasoning, options?.tools, options?.signal, options?.onToolCallDelta
     );
   }
 }

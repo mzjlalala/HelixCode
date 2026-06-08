@@ -52,6 +52,17 @@ export interface ChatProvider {
   completeStream?(
     messages: ChatMessage[],
     onToken: (token: string) => void,
-    options?: { signal?: AbortSignal; tools?: ToolDefinition[]; onReasoning?: (token: string) => void }
+    options?: {
+      signal?: AbortSignal;
+      tools?: ToolDefinition[];
+      onReasoning?: (token: string) => void;
+      /** tool_calls 参数 JSON 增量（写代码时流式预览） */
+      onToolCallDelta?: (event: {
+        index: number;
+        name?: string;
+        argumentsDelta: string;
+        argumentsSoFar: string;
+      }) => void;
+    }
   ): Promise<ChatResult>;
 }

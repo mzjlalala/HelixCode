@@ -20,6 +20,7 @@ import {
 } from '../core/constants.js';
 import { buildContextUsage, type ContextUsage } from '../core/token-estimate.js';
 import type { TokenUsage } from '../llm/types.js';
+import type { ToolActivityEvent, ToolCallStreamEvent } from './stream-events.js';
 
 export type AgentTurnResult =
   | { type: 'final'; message: string; timeline?: TimingEntry[] }
@@ -98,6 +99,12 @@ export class TerminalAgent {
     projectInstructions?: ProjectInstruction[];
     onToken?: (token: string) => void;
     onReasoning?: (text: string) => void;
+    /** 每轮 LLM 请求开始前（重置 tool 流式 UI 状态） */
+    onLlmRoundStart?: () => void;
+    /** tool_calls 参数 JSON 增量 */
+    onToolCallDelta?: (event: ToolCallStreamEvent) => void;
+    /** 安全工具执行开始/结束 */
+    onToolActivity?: (event: ToolActivityEvent) => void;
     /** Inject a custom tool registry (defaults to the built-in one). */
     registry?: ToolRegistry;
     /** Session limits from .helix/config.json */
@@ -465,11 +472,13 @@ export class TerminalAgent {
     signal?: AbortSignal
   ): Promise<ChatResult> {
     const definitions = this.registry.getDefinitions();
+    this.options.onLlmRoundStart?.();
     if (this.options.onToken && this.options.provider.completeStream) {
       return this.options.provider.completeStream(messages, this.options.onToken, {
         tools: definitions,
         ...(signal ? { signal } : {}),
-        ...(this.options.onReasoning ? { onReasoning: this.options.onReasoning } : {})
+        ...(this.options.onReasoning ? { onReasoning: this.options.onReasoning } : {}),
+        ...(this.options.onToolCallDelta ? { onToolCallDelta: this.options.onToolCallDelta } : {})
       });
     }
     return this.options.provider.complete(messages, definitions);
@@ -479,12 +488,16 @@ export class TerminalAgent {
   private async executeTool(call: ToolCall, signal?: AbortSignal): Promise<string> {
     if (signal?.aborted) return JSON.stringify({ ok: false, error: 'Interrupted.' });
 
+    const summary = toolSummary(call.name, call.arguments ?? {});
+    this.options.onToolActivity?.({ phase: 'start', tool: call.name, summary });
     const start = performance.now();
     try {
       const args = call.arguments ?? {};
       return await this.registry.executeSafe(call.name, this.options.cwd, args, signal);
     } finally {
-      this.timeline.record(call.name, performance.now() - start);
+      const ms = performance.now() - start;
+      this.timeline.record(call.name, ms);
+      this.options.onToolActivity?.({ phase: 'end', tool: call.name, ms });
     }
   }
 

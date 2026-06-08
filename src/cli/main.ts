@@ -28,6 +28,7 @@ import type { ConfirmedToolResult, TimingEntry } from '../agent/terminal-agent.j
 import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
 import { undoLast, loadUndoStack } from '../tools/undo.js';
+import { AgentStreamUI } from './stream-ui.js';
 
 /**
  * 跨平台控制台输出辅助
@@ -107,12 +108,14 @@ program
 let currentAbort: AbortController | null = null;
 let currentMode: PermissionMode = 'default';
 let streamedThisTurn = false;
-let lastOutput: 'reasoning' | 'content' | null = null;
+let lastOutput: 'reasoning' | 'content' | 'tool' | null = null;
 let turnStartMs = 0;
 let cliTimings: TimingEntry[] = [];
 let timerInterval: ReturnType<typeof setInterval> | null = null;
 let timerFrame = 0;
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/** REPL 流式输出 UI（代码/tool 增量展示） */
+const streamUI = new AgentStreamUI(writeOutput);
 
 /** 启动 Agent 等待期间的旋转计时器（200ms 刷新） */
 function startTimer(): void {
@@ -177,6 +180,7 @@ export async function runOnce(
     ...(options.maxToolRounds ? { maxToolRounds: options.maxToolRounds } : {})
   });
   if (!context) return;
+  streamUI.reset();
   turnStartMs = performance.now();
   cliTimings = [];
   startTimer();
@@ -375,6 +379,7 @@ async function handleInputLine(
   currentAbort = abort;
   streamedThisTurn = false;
   lastOutput = null;
+  streamUI.reset();
   turnStartMs = performance.now();
   cliTimings = [];
   startTimer();
@@ -443,8 +448,13 @@ async function handleAgentResult(
   lastOutput = null;
 
   output.write(`${style.label('┈')} ${style.bold(result.tool.replace(/_/g, ' '))}  ${style.dim(result.summary)}\n`);
-  const preview = await previewConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
-  output.write(`${preview}\n`);
+  const streamedCodeTools = new Set(['write_file', 'edit_file', 'apply_patch', 'replace_in_file']);
+  if (streamUI.toolPreviewStreamed && streamedCodeTools.has(result.tool)) {
+    output.write(`${style.dim('  (code streamed above — review before approving)')}\n`);
+  } else {
+    const preview = await previewConfirmedTool(context.config.cwd, result, context.agent.getToolRegistry());
+    output.write(`${preview}\n`);
+  }
 
   // plan 模式：只读，自动跳过所有需确认工具
   if (shouldSkip(result.tool, currentMode)) {
@@ -625,23 +635,28 @@ async function createRuntimeContext(
         ? { modelContextLimits: fileConfig.modelContextLimits }
         : {})
     },
-    // 流式 token：停止 spinner，与 reasoning 输出互斥换行
+    // 流式 token / tool 参数 / reasoning
     onToken: (token) => {
       stopTimerAndFreeze();
       streamedThisTurn = true;
-      if (lastOutput === 'reasoning') writeOutput('\n');
       lastOutput = 'content';
-      // 分块写入，降低大 token 单次 write 延迟
-      for (let i = 0; i < token.length; i += 4) {
-        writeOutput(token.slice(i, i + 4));
-      }
+      streamUI.handleContentToken(token);
     },
-    // 推理/思考过程：斜体暗淡样式
     onReasoning: (text) => {
       stopTimerAndFreeze();
-      if (lastOutput === 'content') writeOutput('\n');
       lastOutput = 'reasoning';
-      writeOutput(`\x1b[2m\x1b[3m${text}\x1b[0m`);
+      streamUI.handleReasoning(text);
+    },
+    onLlmRoundStart: () => streamUI.beginLlmRound(),
+    onToolCallDelta: (event) => {
+      stopTimerAndFreeze();
+      streamedThisTurn = true;
+      lastOutput = 'tool';
+      streamUI.handleToolCallDelta(event);
+    },
+    onToolActivity: (event) => {
+      stopTimerAndFreeze();
+      streamUI.handleToolActivity(event);
     }
   });
   return { config, projectInstructions, runtime, agent, session };
