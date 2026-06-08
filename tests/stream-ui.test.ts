@@ -45,4 +45,32 @@ describe('AgentStreamUI', () => {
     expect(chunks.join('')).toContain('ts');
     expect(chunks.join('')).toContain('const x = 1;');
   });
+
+  it('inserts newline between reasoning and answer', () => {
+    const chunks: string[] = [];
+    const ui = new AgentStreamUI((text) => chunks.push(text));
+    ui.handleReasoning('Thinking...');
+    ui.handleContentToken('Answer here\n');
+    const out = chunks.join('');
+    expect(out).toContain('Thinking...');
+    expect(out).toContain('\nAnswer here');
+  });
+
+  it('strips bold markdown in streamed answer', () => {
+    const chunks: string[] = [];
+    const ui = new AgentStreamUI((text) => chunks.push(text));
+    ui.handleContentToken('**排行榜**\n');
+    ui.flushContent();
+    expect(chunks.join('')).toContain('排行榜');
+    expect(chunks.join('')).not.toContain('**');
+  });
+
+  it('inserts newline between reasoning and tool activity', () => {
+    const chunks: string[] = [];
+    const ui = new AgentStreamUI((text) => chunks.push(text));
+    ui.handleReasoning('Search now');
+    ui.handleToolActivity({ phase: 'start', tool: 'web_search', summary: 'Execute web_search' });
+    expect(chunks.join('')).toMatch(/Search now[\s\S]*Execute web_search/);
+    expect(chunks.join('')).toContain('\n');
+  });
 });

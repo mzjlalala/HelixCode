@@ -8,6 +8,7 @@
 
 import { style, SYMBOL } from './style.js';
 import { extractPartialJsonStringField, toolStreamContentField } from './json-stream.js';
+import { ContentStreamFormatter } from './terminal-format.js';
 import type { ToolActivityEvent, ToolCallStreamEvent } from '../agent/stream-events.js';
 
 export type { ToolActivityEvent, ToolCallStreamEvent } from '../agent/stream-events.js';
@@ -23,6 +24,7 @@ export class AgentStreamUI {
   private toolStreamPath = '';
   private toolStreamDisplayedLen = 0;
   private lastOutput: 'reasoning' | 'content' | 'tool' | null = null;
+  private readonly contentFormatter = new ContentStreamFormatter();
 
   /** 本轮是否已通过 tool 流展示过代码（确认 UI 可跳过重复 diff） */
   toolPreviewStreamed = false;
@@ -45,6 +47,12 @@ export class AgentStreamUI {
     this.toolStreamDisplayedLen = 0;
     this.lastOutput = null;
     this.toolPreviewStreamed = false;
+    this.contentFormatter.reset();
+  }
+
+  /** 刷出流式正文缓冲区（一轮对话结束前调用） */
+  flushContent(): string {
+    return this.contentFormatter.flush();
   }
 
   /** 流式正文 token */
@@ -123,6 +131,8 @@ export class AgentStreamUI {
   /** 安全工具执行开始/结束 */
   handleToolActivity(event: ToolActivityEvent): void {
     if (event.phase === 'start') {
+      if (this.lastOutput === 'reasoning') this.write('\n');
+      this.lastOutput = 'tool';
       const label = event.summary ?? event.tool.replace(/_/g, ' ');
       this.write(`${style.dim(`${SYMBOL.bullet} ${label}…`)}\n`);
       return;
@@ -134,8 +144,12 @@ export class AgentStreamUI {
 
   private writeContent(text: string): void {
     if (!text) return;
+    if (this.lastOutput === 'reasoning' || this.lastOutput === 'tool') {
+      this.write('\n');
+    }
     this.lastOutput = 'content';
-    this.write(text);
+    const formatted = this.contentFormatter.push(text);
+    if (formatted) this.write(formatted);
   }
 
   private writeCode(text: string): void {

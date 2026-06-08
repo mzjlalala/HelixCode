@@ -30,6 +30,7 @@ import { showWelcome, style, SYMBOL } from './style.js';
 import { cycleMode, formatModeTag, MODE_LABELS, PermissionMode, shouldAutoApprove, shouldSkip } from './permission-mode.js';
 import { undoLast, loadUndoStack } from '../tools/undo.js';
 import { AgentStreamUI } from './stream-ui.js';
+import { stripMarkdown } from './terminal-format.js';
 
 /**
  * 跨平台控制台输出辅助
@@ -147,24 +148,6 @@ function stopTimerAndFreeze(): void {
     output.write('\r' + ' '.repeat(30) + '\r');
   }
 }
-
-/**
- * 移除非流式输出中的 Markdown 格式，适配纯终端显示
- */
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/\*\*(.+?)\*\*/g, '$1')
-    .replace(/`(.+?)`/g, '$1')
-    .replace(/^-\s+/gm, '• ')
-    .replace(/^\|[\s:-]+\|[\s:-]+\|$/gm, '')
-    .replace(/^\|(.+)\|$/gm, (_, s) => s.split('|').map((c: string) => c.trim()).join('  '))
-    .replace(/^---+$/gm, '')
-    .replace(/^>\s+/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+/, '');
-}
-
 
 /**
  * 一次性执行模式：运行单条 prompt，处理确认循环后输出 Git 摘要
@@ -455,6 +438,8 @@ async function handleAgentResult(
       const prefix = lastOutput ? '\n' : '';
       output.write(`${prefix}${message}\n`);
     } else {
+      const tail = streamUI.flushContent();
+      if (tail) output.write(tail);
       output.write('\n');
     }
 
