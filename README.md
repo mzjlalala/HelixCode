@@ -119,12 +119,17 @@ Create `.helix/config.json` in your project root to persist settings (see `helix
 | `contextTokenLimit` | Fallback context limit when model is not in `modelContextLimits` |
 | `maxHistoryMessages` | In-memory and persisted history cap (default 80) |
 | `compactKeepMessages` | Default keep count for `/compact N` (message mode) |
+| `maxToolRounds` | Max LLM/tool loops per user message (default 12; increase for deep research) |
 
 The permission mode is **automatically saved** when you change it with Shift+Tab or `/mode`.
 
 ### Web search (optional)
 
-Set `HELIX_BING_API_KEY` in `.env` for reliable `web_search` results via the Bing Web Search API. Without it, HelixCode falls back to HTML scraping (less stable).
+Set `TAVILY_API_KEY` in `.env` for reliable `web_search` via [Tavily Search API](https://tavily.com) (recommended). Without it, HelixCode tries legacy Bing API (`HELIX_BING_API_KEY`) or HTML scraping fallback.
+
+```bash
+export TAVILY_API_KEY=tvly-your-key-here
+```
 
 ### 3. CLI flags
 
@@ -189,7 +194,7 @@ helix --yes --max-turns 10 "fix the failing tests"
 
 ## Architecture
 
-HelixCode uses **native OpenAI tool calling** (`tools` parameter + `tool_calls` response) to drive an agent loop. The agent can make up to 6 tool calls per turn.
+HelixCode uses **native OpenAI tool calling** (`tools` parameter + `tool_calls` response) to drive an agent loop. The agent can make up to 12 tool rounds per turn by default (configurable via `maxToolRounds` in `.helix/config.json`). When the limit is reached, it synthesizes an answer from collected results instead of stopping silently.
 
 ### Tools
 
@@ -201,7 +206,7 @@ HelixCode uses **native OpenAI tool calling** (`tools` parameter + `tool_calls` 
 | `git_status` | ✅ | Git working tree status |
 | `git_diff` | ✅ | Git diff (unstaged) |
 | `update_plan` | ✅ | Track multi-step plan |
-| `web_search` | ✅ | Search the web (Bing API with `HELIX_BING_API_KEY`, HTML fallback) |
+| `web_search` | ✅ | Search the web (Tavily with `TAVILY_API_KEY`, Bing/HTML fallback) |
 | `web_fetch` | ✅ | Fetch and extract text from a URL |
 | `write_file` | — | Write file (confirmed) |
 | `replace_in_file` | — | Replace exact text (confirmed) |
@@ -222,7 +227,7 @@ Place `AGENTS.md` or `.helix/instructions.md` at the project root to inject cust
 - **Streaming output** — tokens appear in real-time as the model generates them
 - **Native tool calling** — uses OpenAI-compatible `tools`/`tool_calls` protocol
 - **DeepSeek reasoning** — automatic thinking mode with `reasoning_content` preservation
-- **Web search & fetch** — search the web via Bing (`web_search`) and fetch URLs (`web_fetch`), no API key required for either
+- **Web search & fetch** — search via Tavily (`TAVILY_API_KEY`) or Bing/HTML fallback (`web_search`); fetch URLs (`web_fetch`)
 - **Permission modes** — cycle via Shift+Tab: `default` (ask each), `edit` (auto file edits), `plan` (read-only), `auto` (all auto). Persisted to config file
 - **Session persistence** — conversation history auto-saves to `.helix/history.json` and restores on next launch
 - **Undo** — `/undo` reverts the last file modification (write, edit, replace, patch)
