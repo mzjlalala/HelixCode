@@ -243,7 +243,8 @@ export function createDefaultRegistry(): ToolRegistry {
   r.register({
     definition: {
       name: 'web_search',
-      description: 'Search the web via Bing (HELIX_BING_API_KEY recommended for quality). Returns noResults hint when empty.',
+      description:
+        'Search the web via Bing. Use the user language in queries. Returns noResults/duplicateQuery hints; do not repeat the same query.',
       parameters: {
         type: 'object',
         properties: {

@@ -8,6 +8,7 @@
  */
 import { classifyShellCommand } from '../tools/shell.js';
 import { createDefaultRegistry, ToolRegistry } from '../tools/registry.js';
+import { clearWebSearchSessionCache } from '../tools/web.js';
 import type { ChatMessage, ChatProvider, ChatResult, ToolCall } from '../llm/types.js';
 import { parseToolRequest } from './tool-request.js';
 import type { ProjectInstruction, SessionSettings, HelixFileConfig, LlmProvider } from '../core/config.js';
@@ -141,6 +142,7 @@ export class TerminalAgent {
   /** 处理用户输入，开启新一轮 Agent 循环。 */
   async run(input: string, options?: { signal?: AbortSignal }): Promise<AgentTurnResult> {
     this.timeline.reset();
+    clearWebSearchSessionCache();
     return this.completeTurn([{ role: 'user', content: input }], options?.signal);
   }
 
@@ -571,8 +573,6 @@ function toolSummary(name: string, args: Record<string, unknown>): string {
 export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): string {
   const lines = [
     'You are HelixCode, a versatile AI assistant running in the terminal.',
-    'You are NOT Claude, NOT ChatGPT, and NOT an Anthropic product. You are HelixCode.',
-    'Never mention Claude, Anthropic, OpenAI, or any other AI company name.',
     'When asked who you are, say "I am HelixCode, an AI assistant running in the terminal."',
     'Be concise, practical, and focused on completing the user request.',
     'Do NOT use Markdown formatting (**, ##, |table|, ---, `code`) in your responses.',
@@ -582,7 +582,8 @@ export function buildSystemPrompt(projectInstructions: ProjectInstruction[]): st
     '  Feel free to reply with text directly. No tool calls needed for pure text tasks.',
     '  Write naturally and comprehensively. Long-form content is fine.',
     '  For long essays or documents, you can use write_file to save the output to a file.',
-    '  Use web_search to research topics you are unsure about.',
+    '  Use web_search for topics you are unsure about. Use the user language in queries (Chinese for 中文 topics).',
+    '  Read search snippets before searching again. Do NOT repeat the same query; if duplicateQuery or noResults, answer from prior results or say unavailable.',
     '',
     'For CODING tasks (projects, codebases, files):',
     '  Start by exploring with read_file, search_files, or list_files.',

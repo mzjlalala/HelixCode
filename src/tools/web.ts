@@ -21,15 +21,30 @@ export type WebToolResult =
       results?: WebSearchResult[];
       /** 无匹配结果时为 true，提示 Agent 勿重复相同查询 */
       noResults?: boolean;
+      /** 本会话已搜过相同 query，提示 Agent 勿再调用 */
+      duplicateQuery?: boolean;
       query?: string;
       suggestion?: string;
       source?: 'bing-api' | 'bing-html';
     }
   | { ok: false; error: string; query?: string; suggestion?: string };
 
-const SEARCH_TIMEOUT_MS = 10_000;
-const MAX_HTML_RETRIES = 2;
+const SEARCH_TIMEOUT_MS = 8_000;
+const MAX_HTML_RETRIES = 1;
 const API_TIMEOUT_MS = 8_000;
+
+/** 单轮对话内去重，避免 Agent 对同一 query 反复搜索 */
+const sessionSearchCache = new Map<string, WebToolResult>();
+
+/** 每轮用户输入开始时由 Agent 调用，清空搜索缓存 */
+export function clearWebSearchSessionCache(): void {
+  sessionSearchCache.clear();
+}
+
+const SEARCH_STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'about', 'what', 'when', 'where', 'how',
+  '的', '是', '在', '和', '与', '了', '吗', '呢', '啊',
+]);
 
 // ── web_search ──────────────────────────────────────────────
 
@@ -43,32 +58,62 @@ export async function webSearchTool(
 
   const maxResults = Math.min(Math.max(count ?? WEB_SEARCH_DEFAULT_COUNT, 1), WEB_SEARCH_MAX_COUNT);
   const hasBingKey = Boolean(process.env.HELIX_BING_API_KEY?.trim());
+  const cacheKey = `${normalizeSearchQuery(q)}|${maxResults}`;
+
+  const cached = sessionSearchCache.get(cacheKey);
+  if (cached?.ok) {
+    return {
+      ...cached,
+      duplicateQuery: true,
+      content: `${cached.content}\n\n[duplicateQuery] This exact query was already searched in the current turn. Do NOT call web_search again with the same or similar query; use the results above or answer from snippets.`,
+    };
+  }
 
   // 1) 配置了密钥时走 Bing Web Search API
   const apiKey = process.env.HELIX_BING_API_KEY?.trim();
   if (apiKey) {
     const apiResult = await tryBingApi(q, maxResults, apiKey);
-    if (apiResult && apiResult.ok && apiResult.results?.length) return apiResult;
+    if (apiResult && apiResult.ok && apiResult.results?.length) {
+      rememberSearchResult(cacheKey, apiResult);
+      return apiResult;
+    }
     // API 无结果或失败 → 继续 HTML 回退
   }
 
-  // 2) HTML 抓取（cn.bing.com → www.bing.com）
+  // 2) HTML 抓取（按查询语言选择 cn/www + ensearch 等参数）
   const htmlResult = await scrapeBingHtml(q, maxResults);
-  if (htmlResult.ok && htmlResult.results?.length) return htmlResult;
+  if (htmlResult.ok && htmlResult.results?.length) {
+    rememberSearchResult(cacheKey, htmlResult);
+    return htmlResult;
+  }
 
   // 3) 明确的无结果反馈，避免 Agent 反复相同查询
   const suggestion = hasBingKey
-    ? 'Try a shorter or English query, or use web_fetch with a known URL.'
-    : 'Set HELIX_BING_API_KEY for reliable results, rephrase the query, or use web_fetch with a known URL.';
+    ? 'Rephrase the query in the user language, or use web_fetch with a known URL.'
+    : 'Rephrase in the user language, set HELIX_BING_API_KEY for better results, or use web_fetch.';
 
-  return {
+  const noResult: WebToolResult = {
     ok: true,
     noResults: true,
     query: q,
-    content: `No web results found for "${q}". Do not repeat the same query; rephrase or use web_fetch instead.`,
+    content: `No web results found for "${q}". Do NOT repeat the same query. Rephrase (prefer user language) or use web_fetch instead.`,
     suggestion,
-    ...(htmlResult.ok && htmlResult.source ? { source: htmlResult.source } : {})
+    ...(htmlResult.ok && htmlResult.source ? { source: htmlResult.source } : {}),
   };
+  rememberSearchResult(cacheKey, noResult);
+  return noResult;
+}
+
+function rememberSearchResult(key: string, result: WebToolResult): void {
+  sessionSearchCache.set(key, result);
+  if (sessionSearchCache.size > 32) {
+    const first = sessionSearchCache.keys().next().value;
+    if (first) sessionSearchCache.delete(first);
+  }
+}
+
+function normalizeSearchQuery(query: string): string {
+  return query.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 // ── Bing Web Search API ─────────────────────────────────────
@@ -82,11 +127,12 @@ async function tryBingApi(
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
+    const mkt = isMostlyLatinQuery(query) ? 'en-US' : 'zh-CN';
     const params = new URLSearchParams({
       q: query,
       count: String(count),
-      mkt: 'zh-CN',
-      responseFilter: 'Webpages'
+      mkt,
+      responseFilter: 'Webpages',
     });
 
     const response = await fetch(
@@ -142,36 +188,66 @@ async function tryBingApi(
 
 // ── HTML scraping fallback ──────────────────────────────────
 
+/** 按查询语言生成 Bing 搜索 URL（英文查询在 cn.bing 需 ensearch=1） */
+function buildBingSearchUrls(query: string): string[] {
+  const q = encodeURIComponent(query);
+  if (isMostlyLatinQuery(query)) {
+    return [
+      `https://cn.bing.com/search?q=${q}&ensearch=1`,
+      `https://www.bing.com/search?q=${q}&setlang=en-US&cc=US&mkt=en-US`,
+    ];
+  }
+  return [
+    `https://cn.bing.com/search?q=${q}`,
+    `https://www.bing.com/search?q=${q}&setlang=zh-CN&mkt=zh-CN`,
+  ];
+}
+
+function isMostlyLatinQuery(query: string): boolean {
+  const cjk = (query.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  const latin = (query.match(/[a-zA-Z]/g) ?? []).length;
+  return latin > cjk && latin >= 4;
+}
+
 async function scrapeBingHtml(
   query: string,
   maxResults: number
 ): Promise<WebToolResult> {
-  const hosts = ['https://cn.bing.com/search', 'https://www.bing.com/search'];
+  const tried = await tryBingSearchUrls(buildBingSearchUrls(query), query, maxResults);
+  if (tried) return tried;
+
+  return { ok: false, error: 'Search failed or no relevant results.', query };
+}
+
+async function tryBingSearchUrls(
+  urls: string[],
+  query: string,
+  maxResults: number
+): Promise<WebToolResult | null> {
   let lastError = '';
 
-  for (const host of hosts) {
+  for (const searchUrl of urls) {
     for (let attempt = 0; attempt <= MAX_HTML_RETRIES; attempt += 1) {
       if (attempt > 0) {
-        await sleep(250 * Math.pow(2, attempt));
+        await sleep(300);
       }
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
 
       try {
-        const response = await fetch(
-          `${host}?q=${encodeURIComponent(query)}`,
-          {
-            method: 'GET',
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'text/html',
-              'Accept-Language': 'zh-CN,en;q=0.9'
-            },
-            signal: controller.signal
-          }
-        );
+        const response = await fetch(searchUrl, {
+          method: 'GET',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html',
+            'Accept-Language': isMostlyLatinQuery(query)
+              ? 'en-US,en;q=0.9'
+              : 'zh-CN,en;q=0.9',
+          },
+          signal: controller.signal,
+        });
 
         clearTimeout(timer);
 
@@ -184,17 +260,16 @@ async function scrapeBingHtml(
         const results = parseBingResults(html, maxResults);
 
         if (results.length === 0) {
-          lastError = `No parseable Bing HTML results for "${query}" on ${host}.`;
+          lastError = `No parseable Bing HTML results for "${query}".`;
           continue;
         }
 
-        const content = results
-          .map(
-            (r, i) =>
-              `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`
-          )
-          .join('\n\n');
+        if (!looksRelevantToQuery(query, results)) {
+          lastError = `Bing results on ${searchUrl} look off-topic for "${query}".`;
+          continue;
+        }
 
+        const content = formatSearchResultsContent(results);
         return { ok: true, content, results, source: 'bing-html' };
       } catch (error) {
         clearTimeout(timer);
@@ -208,7 +283,72 @@ async function scrapeBingHtml(
     }
   }
 
-  return { ok: false, error: lastError || 'Search failed.', query };
+  return null;
+}
+
+function formatSearchResultsContent(results: WebSearchResult[]): string {
+  return results
+    .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
+    .join('\n\n');
+}
+
+/** 粗判结果是否与 query 相关，过滤「只匹配年份」等明显跑偏 */
+function looksRelevantToQuery(query: string, results: WebSearchResult[]): boolean {
+  const tokens = extractSearchTokens(query);
+  if (tokens.length === 0) return true;
+
+  const blob = results
+    .map((r) => `${r.title} ${r.snippet} ${r.url}`.toLowerCase())
+    .join(' ');
+
+  // 多个 token 时，纯 4 位年份不能单独撑起相关性
+  const substantive = tokens.filter((t) => !/^\d{4}$/.test(t));
+  const pool = substantive.length > 0 ? substantive : tokens;
+
+  const hits = pool.filter((t) => blob.includes(t.toLowerCase())).length;
+  if (pool.length === 1) return hits >= 1;
+
+  const need = Math.min(pool.length, Math.max(2, Math.ceil(pool.length * 0.4)));
+  return hits >= need;
+}
+
+function extractSearchTokens(query: string): string[] {
+  const trimmed = query.trim();
+  const tokens = new Set<string>();
+
+  for (const seg of trimmed.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    tokens.add(seg);
+  }
+
+  for (const word of trimmed.toLowerCase().split(/[\s,，、。！？]+/)) {
+    const w = word.trim();
+    if (w.length > 2 && !SEARCH_STOP_WORDS.has(w)) {
+      tokens.add(w);
+    }
+  }
+
+  return [...tokens];
+}
+
+/** 解析 Bing ck/a 跳转链接为真实目标 URL */
+function resolveBingResultUrl(rawHref: string): string {
+  const href = rawHref.replace(/&amp;/g, '&');
+  if (!href.includes('bing.com/ck/a')) return href;
+
+  try {
+    const parsed = new URL(href);
+    const encoded = parsed.searchParams.get('u');
+    if (!encoded) return href;
+
+    const b64 = encoded.startsWith('a1') ? encoded.slice(2) : encoded;
+    const decoded = Buffer.from(b64, 'base64').toString('utf8');
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) {
+      return decoded;
+    }
+  } catch {
+    // 解码失败则保留原链接
+  }
+  return href;
 }
 
 // ── Bing HTML parsing strategies ────────────────────────────
@@ -230,28 +370,36 @@ function parseBingResults(html: string, maxResults: number): WebSearchResult[] {
   return [];
 }
 
-/** 策略 1：解析 `<li class="b_algo">` 结果块 */
+/** 策略 1：解析 `<li class="b_algo">`（新版 Bing：标题在 h2>a，摘要 in b_caption） */
 function parseBAlgoStrategy(html: string, maxResults: number): WebSearchResult[] {
   const results: WebSearchResult[] = [];
-  const items = html.split('<li class="b_algo"');
+  const items = html.split(/<li class="b_algo"/i);
 
   for (const item of items.slice(1, maxResults + 1)) {
-    const linkMatch = item.match(
-      /<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/
+    const titleMatch = item.match(
+      /<h2[^>]*>[\s\S]*?<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i
     );
-    const snippetMatch = item.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+    if (!titleMatch) continue;
 
-    if (linkMatch) {
-      const title = stripTags(linkMatch[2] ?? '').trim();
-      const url = (linkMatch[1] ?? '').replace(/&amp;/g, '&');
-      const snippet = snippetMatch
-        ? stripTags(snippetMatch[1]!).trim()
-        : '';
-      if (title) results.push({ title, url, snippet });
+    const title = decodeHtmlEntities(stripTags(titleMatch[2] ?? '')).trim();
+    const url = resolveBingResultUrl(titleMatch[1] ?? '');
+    const snippetMatch =
+      item.match(/<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/i) ??
+      item.match(/<div[^>]*class="[^"]*b_caption[^"]*"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i);
+    const snippet = snippetMatch
+      ? decodeHtmlEntities(stripTags(snippetMatch[1]!)).trim()
+      : '';
+
+    if (title && url.startsWith('http') && !isBingNavUrl(url)) {
+      results.push({ title, url, snippet });
     }
   }
 
   return results;
+}
+
+function isBingNavUrl(url: string): boolean {
+  return url.includes('bing.com') || url.includes('microsoft.com/bing');
 }
 
 /** 策略 2：解析 `<ol id="b_results">` 内的 `<li>` 条目 */
@@ -278,17 +426,17 @@ function parseBResultsStrategy(html: string, maxResults: number): WebSearchResul
     const linkMatch = titleMatch ?? fallbackMatch;
 
     if (linkMatch) {
-      const title = stripTags(linkMatch[2] ?? '').trim().slice(0, 200);
-      const url = (linkMatch[1] ?? '').replace(/&amp;/g, '&');
+      const title = decodeHtmlEntities(stripTags(linkMatch[2] ?? '')).trim().slice(0, 200);
+      const url = resolveBingResultUrl(linkMatch[1] ?? '');
 
       const snippetMatch = item.match(
         /<p[^>]*>([\s\S]{20,500}?)<\/p>/i
       );
       const snippet = snippetMatch
-        ? stripTags(snippetMatch[1]!).trim()
+        ? decodeHtmlEntities(stripTags(snippetMatch[1]!)).trim()
         : '';
 
-      if (title && url.startsWith('http')) {
+      if (title && url.startsWith('http') && !isBingNavUrl(url)) {
         results.push({ title, url, snippet });
       }
     }
@@ -306,11 +454,11 @@ function parseH2LinkStrategy(html: string, maxResults: number): WebSearchResult[
   let match: RegExpExecArray | null;
 
   while ((match = h2Re.exec(html)) !== null) {
-    const url = (match[1] ?? '').replace(/&amp;/g, '&');
-    const title = stripTags(match[2] ?? '').trim();
+    const url = resolveBingResultUrl(match[1] ?? '');
+    const title = decodeHtmlEntities(stripTags(match[2] ?? '')).trim();
 
     if (!url.startsWith('http') || seen.has(url) || title.length < 5) continue;
-    if (url.includes('bing.com') || url.includes('microsoft.com/bing')) continue;
+    if (isBingNavUrl(url)) continue;
 
     seen.add(url);
     results.push({ title, url, snippet: '' });
@@ -330,8 +478,8 @@ function parseGenericStrategy(html: string, maxResults: number): WebSearchResult
   let match: RegExpExecArray | null;
 
   while ((match = linkRe.exec(html)) !== null) {
-    const url = (match[1] ?? '').replace(/&amp;/g, '&');
-    const title = stripTags(match[2] ?? '').trim();
+    const url = resolveBingResultUrl(match[1] ?? '');
+    const title = decodeHtmlEntities(stripTags(match[2] ?? '')).trim();
 
     // 过滤导航、分页等无关链接
     if (
@@ -339,8 +487,7 @@ function parseGenericStrategy(html: string, maxResults: number): WebSearchResult
       seen.has(url) ||
       title.length < 10 ||
       /^(next|previous|page\s+\d|下一页|上一页)$/i.test(title) ||
-      url.includes('bing.com') ||
-      url.includes('microsoft.com/bing')
+      isBingNavUrl(url)
     ) {
       continue;
     }
@@ -369,6 +516,9 @@ export async function webFetchTool(urlString: string): Promise<WebToolResult> {
   if (isBlockedFetchUrl(parsed)) {
     return { ok: false, error: `Blocked URL (private or unsupported scheme): ${urlString}` };
   }
+
+  const wikiSummary = await tryWikipediaSummary(parsed);
+  if (wikiSummary) return wikiSummary;
 
   try {
     const response = await fetch(parsed.toString(), {
@@ -418,6 +568,62 @@ export async function webFetchTool(urlString: string): Promise<WebToolResult> {
 
 function stripTags(html: string): string {
   return html.replace(/<[^>]*>/g, '').trim();
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&ensp;/g, ' ');
+}
+
+/** Wikipedia 走 REST Summary API，比直接抓 HTML 更稳 */
+async function tryWikipediaSummary(url: URL): Promise<WebToolResult | null> {
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith('.wikipedia.org')) return null;
+
+  const wikiIdx = url.pathname.indexOf('/wiki/');
+  if (wikiIdx < 0) return null;
+
+  const title = decodeURIComponent(url.pathname.slice(wikiIdx + 6).replace(/_/g, ' '));
+  if (!title) return null;
+
+  const lang = host.split('.')[0] ?? 'en';
+  const apiUrl = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
+
+  try {
+    const response = await fetch(apiUrl, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json() as {
+      title?: string;
+      extract?: string;
+      content_urls?: { desktop?: { page?: string } };
+    };
+
+    const extract = data.extract?.trim();
+    if (!extract) return null;
+
+    const pageUrl = data.content_urls?.desktop?.page ?? url.toString();
+    const content = `${data.title ?? title}\nURL: ${pageUrl}\n\n${extract}`;
+    return { ok: true, content: content.slice(0, 8000) };
+  } catch {
+    return null;
+  }
+}
+
+/** @internal 供单元测试 */
+export function parseBingResultsForTest(html: string, maxResults: number): WebSearchResult[] {
+  return parseBingResults(html, maxResults);
 }
 
 const BLOCK_TAGS = ['script', 'style', 'nav', 'footer', 'header', 'noscript'];
