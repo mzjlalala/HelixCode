@@ -1,7 +1,54 @@
 import { describe, expect, it } from 'vitest';
-import { isBlockedFetchUrl, parseBingResultsForTest } from '../src/tools/web.js';
+import {
+  isBlockedFetchUrl,
+  mapTavilySearchResponseForTest,
+  parseBingResultsForTest,
+} from '../src/tools/web.js';
 
 const BING_FIXTURE = `<li class="b_algo" data-id><div class="b_tpcn"><a class="tilk" href="https://baike.baidu.com/item/%E4%B8%96%E7%95%8C%E6%9D%AF%E6%8F%AD%E5%B9%95%E6%88%98/67560290"><div class="tptt">baidu.com</div><cite>https://baike.baidu.com › item › 世界杯揭幕战</cite></a></div><h2 class=""><a href="https://baike.baidu.com/item/%E4%B8%96%E7%95%8C%E6%9D%AF%E6%8F%AD%E5%B9%95%E6%88%98/67560290"><strong>世界杯揭幕战</strong>_百度百科</a></h2><div class="b_caption"><p class="b_lineclamp2">2026年美加墨世界杯的揭幕战是本届赛事的开幕比赛，定于2026年6月11日举行。</p></div></li>`;
+
+describe('Tavily response mapping', () => {
+  it('maps API results to web search format', () => {
+    const result = mapTavilySearchResponseForTest(
+      {
+        results: [
+          {
+            title: 'LLM Benchmark',
+            url: 'https://example.com/bench',
+            content: 'GPT-5 leads the chart.',
+            score: 0.92,
+          },
+        ],
+      },
+      5
+    );
+    expect(result?.ok).toBe(true);
+    if (!result?.ok) return;
+    expect(result.source).toBe('tavily');
+    expect(result.content).toContain('LLM Benchmark');
+    expect(result.content).toContain('GPT-5 leads');
+  });
+
+  it('returns null when Tavily response has empty results', () => {
+    const result = mapTavilySearchResponseForTest({ results: [] }, 5);
+    expect(result).toBeNull();
+  });
+
+  it('prepends answer summary when present', () => {
+    const result = mapTavilySearchResponseForTest(
+      {
+        answer: 'Top model is GPT-5.',
+        results: [
+          { title: 'Report', url: 'https://example.com/r', content: 'Details here.' },
+        ],
+      },
+      3
+    );
+    expect(result?.ok).toBe(true);
+    if (!result?.ok) return;
+    expect(result.content).toMatch(/^Summary: Top model is GPT-5\./);
+  });
+});
 
 describe('Bing HTML parsing', () => {
   it('parses h2 title instead of tilk site link', () => {

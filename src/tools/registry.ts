@@ -244,7 +244,7 @@ export function createDefaultRegistry(): ToolRegistry {
     definition: {
       name: 'web_search',
       description:
-        'Search the web via Bing. Use the user language in queries. Returns noResults/duplicateQuery hints; do not repeat the same query.',
+        'Search the web via Tavily (TAVILY_API_KEY) or Bing/HTML fallback. Use the user language in queries. Returns noResults/duplicateQuery hints.',
       parameters: {
         type: 'object',
         properties: {

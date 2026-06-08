@@ -8,6 +8,7 @@
 import type { PlanItem } from '../agent/terminal-agent.js';
 import type { ChatMessage } from '../llm/types.js';
 import { formatContextUsageLines, type ContextUsage } from '../core/token-estimate.js';
+import { DEFAULT_MAX_TOOL_ROUNDS } from '../core/constants.js';
 
 /** 单条斜杠命令的定义：名称、描述与可选用法 */
 export interface SlashCommandDefinition {
@@ -213,7 +214,7 @@ export function handleSlashCommand(
       `model: ${context.model ?? 'unknown'}`,
       `provider: ${context.provider ?? 'unknown'}`,
       `history messages: ${context.historyMessages ?? 0}${context.maxHistoryMessages ? ` / ${context.maxHistoryMessages} max` : ''}`,
-      `tool rounds per turn: ${context.maxToolRounds ?? 6}`,
+      `tool rounds per turn: ${context.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS}`,
       `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`
     ];
     if (context.contextUsage) {
@@ -244,7 +245,7 @@ export function handleSlashCommand(
         'edit_file      Replace an inclusive line range after confirmation',
         'apply_patch    Apply a unified diff after confirmation',
         'run_shell      Run a shell command after confirmation',
-        'web_search     Search the web (Bing API or HTML fallback, no key required)',
+        'web_search     Search the web (Tavily API, Bing API, or HTML fallback)',
         'web_fetch      Fetch readable text from a URL (blocks private addresses)',
         'update_plan    Track multi-step work',
       ].join('\n')
@@ -376,6 +377,7 @@ export function formatDoctor(context: SlashCommandContext): string {
     `project instructions: ${context.projectInstructions?.length ? context.projectInstructions.join(', ') : 'none'}`,
     `history messages: ${context.historyMessages ?? 0}`,
     `plan items: ${context.planItems?.length ?? 0}`,
+    `web search: ${formatWebSearchBackend()}`,
     ...(context.contextUsage ? formatContextUsageLines(context.contextUsage) : [])
   ].join('\n');
 }
@@ -401,6 +403,12 @@ export function parseCompactArg(arg: string): { mode: 'messages'; keep: number }
   }
 
   return { mode: 'tokens', targetTokens: 0 };
+}
+
+function formatWebSearchBackend(): string {
+  if (process.env.TAVILY_API_KEY?.trim()) return 'Tavily (TAVILY_API_KEY set)';
+  if (process.env.HELIX_BING_API_KEY?.trim()) return 'Bing API (HELIX_BING_API_KEY set)';
+  return 'HTML fallback (set TAVILY_API_KEY for reliable results)';
 }
 
 function formatTokenCount(n: number): string {

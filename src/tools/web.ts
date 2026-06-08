@@ -1,8 +1,7 @@
 ﻿/**
  * 网络工具：为 Agent 提供 web_search 与 web_fetch。
  *
- * web_search：优先使用 Bing API（HELIX_BING_API_KEY）；
- *   否则抓取 cn.bing.com，并用 4 层解析策略降低页面改版导致整站失效的风险。
+ * web_search：优先 Tavily（TAVILY_API_KEY）→ Bing API（HELIX_BING_API_KEY）→ HTML 抓取回退。
  * web_fetch：抓取 URL 并提取可读文本，拦截内网/私有地址（SSRF 防护）。
  */
 
@@ -25,7 +24,7 @@ export type WebToolResult =
       duplicateQuery?: boolean;
       query?: string;
       suggestion?: string;
-      source?: 'bing-api' | 'bing-html';
+      source?: 'tavily' | 'bing-api' | 'bing-html';
     }
   | { ok: false; error: string; query?: string; suggestion?: string };
 
@@ -57,6 +56,7 @@ export async function webSearchTool(
   if (!q) return { ok: false, error: 'web_search requires a query.' };
 
   const maxResults = Math.min(Math.max(count ?? WEB_SEARCH_DEFAULT_COUNT, 1), WEB_SEARCH_MAX_COUNT);
+  const hasTavilyKey = Boolean(process.env.TAVILY_API_KEY?.trim());
   const hasBingKey = Boolean(process.env.HELIX_BING_API_KEY?.trim());
   const cacheKey = `${normalizeSearchQuery(q)}|${maxResults}`;
 
@@ -69,28 +69,38 @@ export async function webSearchTool(
     };
   }
 
-  // 1) 配置了密钥时走 Bing Web Search API
-  const apiKey = process.env.HELIX_BING_API_KEY?.trim();
-  if (apiKey) {
-    const apiResult = await tryBingApi(q, maxResults, apiKey);
+  // 1) Tavily Search API（推荐，Bing v7 已退役）
+  const tavilyKey = process.env.TAVILY_API_KEY?.trim();
+  if (tavilyKey) {
+    const tavilyResult = await tryTavilyApi(q, maxResults, tavilyKey);
+    if (tavilyResult) {
+      rememberSearchResult(cacheKey, tavilyResult);
+      return tavilyResult;
+    }
+    // API 错误/超时 → 继续 Bing/HTML 回退
+  }
+
+  // 2) Bing Web Search API（旧版，可能已不可用）
+  const bingKey = process.env.HELIX_BING_API_KEY?.trim();
+  if (bingKey) {
+    const apiResult = await tryBingApi(q, maxResults, bingKey);
     if (apiResult && apiResult.ok && apiResult.results?.length) {
       rememberSearchResult(cacheKey, apiResult);
       return apiResult;
     }
-    // API 无结果或失败 → 继续 HTML 回退
   }
 
-  // 2) HTML 抓取（按查询语言选择 cn/www + ensearch 等参数）
+  // 3) HTML 抓取（按查询语言选择 cn/www + ensearch 等参数）
   const htmlResult = await scrapeBingHtml(q, maxResults);
   if (htmlResult.ok && htmlResult.results?.length) {
     rememberSearchResult(cacheKey, htmlResult);
     return htmlResult;
   }
 
-  // 3) 明确的无结果反馈，避免 Agent 反复相同查询
-  const suggestion = hasBingKey
+  // 4) 明确的无结果反馈，避免 Agent 反复相同查询
+  const suggestion = hasTavilyKey || hasBingKey
     ? 'Rephrase the query in the user language, or use web_fetch with a known URL.'
-    : 'Rephrase in the user language, set HELIX_BING_API_KEY for better results, or use web_fetch.';
+    : 'Rephrase in the user language, set TAVILY_API_KEY for reliable search, or use web_fetch.';
 
   const noResult: WebToolResult = {
     ok: true,
@@ -114,6 +124,101 @@ function rememberSearchResult(key: string, result: WebToolResult): void {
 
 function normalizeSearchQuery(query: string): string {
   return query.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// ── Tavily Search API ───────────────────────────────────────
+
+interface TavilySearchResponse {
+  query?: string;
+  answer?: string;
+  results?: Array<{
+    title: string;
+    url: string;
+    content: string;
+    score?: number;
+  }>;
+}
+
+async function tryTavilyApi(
+  query: string,
+  count: number,
+  apiKey: string
+): Promise<WebToolResult | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+  try {
+    const payload: Record<string, unknown> = {
+      api_key: apiKey,
+      query: query.slice(0, 400),
+      max_results: Math.min(count, 20),
+      search_depth: 'basic',
+      include_answer: 'basic',
+    };
+    if (!isMostlyLatinQuery(query)) {
+      payload.country = 'china';
+    }
+
+    const response = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as TavilySearchResponse;
+    const mapped = mapTavilySearchResponse(data, count);
+    if (mapped) return mapped;
+
+    return {
+      ok: true,
+      noResults: true,
+      query,
+      source: 'tavily',
+      content: `Tavily returned no results for "${query}". Rephrase the query or use web_fetch with a URL from a prior search.`,
+      suggestion: 'Try different keywords in the user language, or web_fetch a specific site.',
+    };
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+function mapTavilySearchResponse(
+  data: TavilySearchResponse,
+  count: number
+): WebToolResult | null {
+  const pages = data.results ?? [];
+  if (pages.length === 0) return null;
+
+  const results: WebSearchResult[] = pages.slice(0, count).map((p) => ({
+    title: p.title,
+    url: p.url,
+    snippet: p.content,
+  }));
+
+  let content = formatSearchResultsContent(results);
+  const answer = data.answer?.trim();
+  if (answer) {
+    content = `Summary: ${answer}\n\n${content}`;
+  }
+
+  return { ok: true, content, results, source: 'tavily' };
+}
+
+/** @internal 供单元测试 */
+export function mapTavilySearchResponseForTest(
+  data: TavilySearchResponse,
+  count: number
+): WebToolResult | null {
+  return mapTavilySearchResponse(data, count);
 }
 
 // ── Bing Web Search API ─────────────────────────────────────
