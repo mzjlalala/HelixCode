@@ -75,10 +75,12 @@ export HELIX_CHAT_MODEL=gpt-4o
 ```bash
 export HELIX_PROVIDER=deepseek
 export DEEPSEEK_API_KEY=sk-your-deepseek-key
-export HELIX_CHAT_MODEL=deepseek-chat
+export HELIX_CHAT_MODEL=deepseek-v4-pro
 ```
 
 DeepSeek thinking mode is automatically enabled. `reasoning_content` is captured and returned in subsequent requests as required by the API.
+
+Copy `helix.config.example.json` to `.helix/config.json` to set per-model context limits (e.g. `deepseek-v4-pro` → 1M tokens).
 
 #### Custom OpenAI-compatible endpoint
 
@@ -91,13 +93,20 @@ export HELIX_CHAT_MODEL=your-model
 
 ### 2. Config file (`.helix/config.json`)
 
-Create `.helix/config.json` in your project root to persist settings:
+Create `.helix/config.json` in your project root to persist settings (see `helix.config.example.json`):
 
 ```json
 {
-  "model": "gpt-4o",
+  "model": "deepseek-v4-pro",
   "permissionMode": "auto",
-  "instructions": ["CUSTOM.md"]
+  "instructions": ["CUSTOM.md"],
+  "modelContextLimits": {
+    "deepseek-v4-pro": 1000000,
+    "gpt-4o": 128000
+  },
+  "contextTokenLimit": 128000,
+  "maxHistoryMessages": 80,
+  "compactKeepMessages": 20
 }
 ```
 
@@ -106,8 +115,16 @@ Create `.helix/config.json` in your project root to persist settings:
 | `model` | Default model (overridden by env var `HELIX_CHAT_MODEL` or `--model`) |
 | `permissionMode` | Permission mode: `default`, `acceptEdits`, `plan`, or `auto` |
 | `instructions` | Additional project instruction file paths |
+| `modelContextLimits` | Per-model context window (tokens); used by `/status` and `/model` |
+| `contextTokenLimit` | Fallback context limit when model is not in `modelContextLimits` |
+| `maxHistoryMessages` | In-memory and persisted history cap (default 80) |
+| `compactKeepMessages` | Default keep count for `/compact N` (message mode) |
 
 The permission mode is **automatically saved** when you change it with Shift+Tab or `/mode`.
+
+### Web search (optional)
+
+Set `HELIX_BING_API_KEY` in `.env` for reliable `web_search` results via the Bing Web Search API. Without it, HelixCode falls back to HTML scraping (less stable).
 
 ### 3. CLI flags
 
@@ -150,18 +167,19 @@ helix --yes --max-turns 10 "fix the failing tests"
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help |
-| `/status` | Show project, model, and session state |
+| `/status` | Show project, model, session state, and context usage (`API` / `est.`) |
 | `/doctor` | Show full diagnostics |
 | `/model` | Show current model |
-| `/model <name>` | Switch model at runtime |
+| `/model <name>` | Switch model (updates context limit from config) |
 | `/mode` | Cycle permission mode (default/edit/plan/auto) |
 | `/undo` | Undo the last file modification |
 | `/history` | Show history message count |
 | `/history search <keyword>` | Search conversation history |
 | `/history save` | Manually save history to disk |
 | `/plan` | Show session plan |
-| `/compact` | Compact session history |
+| `/compact` | Compact history to ~50% of context limit (token-aware) |
 | `/compact N` | Compact to N messages |
+| `/compact 40k` | Compact to ~40k estimated history tokens |
 | `/tools` | List available tools |
 | `/reset` | Clear session context |
 | `/clear` | Clear screen and context |
@@ -183,7 +201,7 @@ HelixCode uses **native OpenAI tool calling** (`tools` parameter + `tool_calls` 
 | `git_status` | ✅ | Git working tree status |
 | `git_diff` | ✅ | Git diff (unstaged) |
 | `update_plan` | ✅ | Track multi-step plan |
-| `web_search` | ✅ | Search the web via Bing |
+| `web_search` | ✅ | Search the web (Bing API with `HELIX_BING_API_KEY`, HTML fallback) |
 | `web_fetch` | ✅ | Fetch and extract text from a URL |
 | `write_file` | — | Write file (confirmed) |
 | `replace_in_file` | — | Replace exact text (confirmed) |

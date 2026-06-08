@@ -15,8 +15,17 @@ export interface WebSearchResult {
 }
 
 export type WebToolResult =
-  | { ok: true; content: string; results?: WebSearchResult[] }
-  | { ok: false; error: string };
+  | {
+      ok: true;
+      content: string;
+      results?: WebSearchResult[];
+      /** 无匹配结果时为 true，提示 Agent 勿重复相同查询 */
+      noResults?: boolean;
+      query?: string;
+      suggestion?: string;
+      source?: 'bing-api' | 'bing-html';
+    }
+  | { ok: false; error: string; query?: string; suggestion?: string };
 
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_HTML_RETRIES = 2;
@@ -29,19 +38,37 @@ export async function webSearchTool(
   query: string,
   count?: number
 ): Promise<WebToolResult> {
-  if (!query.trim()) return { ok: false, error: 'web_search requires a query.' };
+  const q = query.trim();
+  if (!q) return { ok: false, error: 'web_search requires a query.' };
 
   const maxResults = Math.min(Math.max(count ?? WEB_SEARCH_DEFAULT_COUNT, 1), WEB_SEARCH_MAX_COUNT);
+  const hasBingKey = Boolean(process.env.HELIX_BING_API_KEY?.trim());
 
   // 1) 配置了密钥时走 Bing Web Search API
   const apiKey = process.env.HELIX_BING_API_KEY?.trim();
   if (apiKey) {
-    const apiResult = await tryBingApi(query, maxResults, apiKey);
-    if (apiResult) return apiResult;
+    const apiResult = await tryBingApi(q, maxResults, apiKey);
+    if (apiResult && apiResult.ok && apiResult.results?.length) return apiResult;
+    // API 无结果或失败 → 继续 HTML 回退
   }
 
-  // 2) 回退到 cn.bing.com HTML 抓取
-  return scrapeBingHtml(query, maxResults);
+  // 2) HTML 抓取（cn.bing.com → www.bing.com）
+  const htmlResult = await scrapeBingHtml(q, maxResults);
+  if (htmlResult.ok && htmlResult.results?.length) return htmlResult;
+
+  // 3) 明确的无结果反馈，避免 Agent 反复相同查询
+  const suggestion = hasBingKey
+    ? 'Try a shorter or English query, or use web_fetch with a known URL.'
+    : 'Set HELIX_BING_API_KEY for reliable results, rephrase the query, or use web_fetch with a known URL.';
+
+  return {
+    ok: true,
+    noResults: true,
+    query: q,
+    content: `No web results found for "${q}". Do not repeat the same query; rephrase or use web_fetch instead.`,
+    suggestion,
+    ...(htmlResult.ok && htmlResult.source ? { source: htmlResult.source } : {})
+  };
 }
 
 // ── Bing Web Search API ─────────────────────────────────────
@@ -92,7 +119,7 @@ async function tryBingApi(
 
     const pages = data.webPages?.value ?? [];
     if (pages.length === 0) {
-      return { ok: true, content: `No Bing API results for "${query}".` };
+      return null;
     }
 
     const results: WebSearchResult[] = pages.slice(0, count).map((p) => ({
@@ -105,7 +132,7 @@ async function tryBingApi(
       .map((r, i) => `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`)
       .join('\n\n');
 
-    return { ok: true, content, results };
+    return { ok: true, content, results, source: 'bing-api' };
   } catch {
     clearTimeout(timer);
     // 超时或网络错误 — 交给 HTML 回退
@@ -119,66 +146,69 @@ async function scrapeBingHtml(
   query: string,
   maxResults: number
 ): Promise<WebToolResult> {
+  const hosts = ['https://cn.bing.com/search', 'https://www.bing.com/search'];
   let lastError = '';
 
-  for (let attempt = 0; attempt <= MAX_HTML_RETRIES; attempt += 1) {
-    if (attempt > 0) {
-      await sleep(250 * Math.pow(2, attempt));
-    }
+  for (const host of hosts) {
+    for (let attempt = 0; attempt <= MAX_HTML_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        await sleep(250 * Math.pow(2, attempt));
+      }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
 
-    try {
-      const response = await fetch(
-        `https://cn.bing.com/search?q=${encodeURIComponent(query)}`,
-        {
-          method: 'GET',
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html',
-            'Accept-Language': 'zh-CN'
-          },
-          signal: controller.signal
+      try {
+        const response = await fetch(
+          `${host}?q=${encodeURIComponent(query)}`,
+          {
+            method: 'GET',
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html',
+              'Accept-Language': 'zh-CN,en;q=0.9'
+            },
+            signal: controller.signal
+          }
+        );
+
+        clearTimeout(timer);
+
+        if (!response.ok) {
+          lastError = `Bing returned HTTP ${response.status}`;
+          continue;
         }
-      );
 
-      clearTimeout(timer);
+        const html = await response.text();
+        const results = parseBingResults(html, maxResults);
 
-      if (!response.ok) {
-        lastError = `Bing returned HTTP ${response.status}`;
-        continue;
-      }
+        if (results.length === 0) {
+          lastError = `No parseable Bing HTML results for "${query}" on ${host}.`;
+          continue;
+        }
 
-      const html = await response.text();
-      const results = parseBingResults(html, maxResults);
+        const content = results
+          .map(
+            (r, i) =>
+              `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`
+          )
+          .join('\n\n');
 
-      if (results.length === 0) {
-        lastError = `No Bing results for "${query}".`;
-        return { ok: true, content: lastError };
-      }
-
-      const content = results
-        .map(
-          (r, i) =>
-            `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`
-        )
-        .join('\n\n');
-
-      return { ok: true, content, results };
-    } catch (error) {
-      clearTimeout(timer);
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('abort') || msg.includes('timeout')) {
-        lastError = 'Search timed out.';
-      } else {
-        lastError = `Search failed: ${msg}`;
+        return { ok: true, content, results, source: 'bing-html' };
+      } catch (error) {
+        clearTimeout(timer);
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('abort') || msg.includes('timeout')) {
+          lastError = 'Search timed out.';
+        } else {
+          lastError = `Search failed: ${msg}`;
+        }
       }
     }
   }
 
-  return { ok: false, error: lastError || 'Search failed.' };
+  return { ok: false, error: lastError || 'Search failed.', query };
 }
 
 // ── Bing HTML parsing strategies ────────────────────────────

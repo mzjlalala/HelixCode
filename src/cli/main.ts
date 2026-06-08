@@ -19,6 +19,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, loadFileConfig, loadPermissionMode, loadProjectInstructions, mergeFileConfig, resolveSessionSettings, savePermissionMode, type SessionSettings } from '../core/config.js';
 import { loadHistory, saveHistory } from '../core/history-store.js';
+import { sanitizeHistoryForLoad } from '../core/history-validate.js';
 import { loadPlan } from '../core/plan-store.js';
 import { TerminalAgent } from '../agent/terminal-agent.js';
 import { OpenAIChatProvider } from '../llm/openai-provider.js';
@@ -214,11 +215,18 @@ export async function runRepl(
   // 权限模式优先级：CLI --mode > .helix/config.json > default
   currentMode = modeOverride ?? (await loadPermissionMode(config.cwd)) ?? 'default';
 
-  // 从磁盘恢复会话历史
+  // 从磁盘恢复会话历史（校验 tool_calls 配对，丢弃损坏尾部）
   const savedMessages = await loadHistory(config.cwd);
   if (savedMessages.length > 0) {
-    agent.loadHistory(savedMessages);
-    output.write(`Restored session: ${savedMessages.length} messages from .helix/history.json\n`);
+    const { messages, dropped, reason } = sanitizeHistoryForLoad(savedMessages);
+    if (messages.length > 0) {
+      agent.loadHistory(messages);
+      output.write(`Restored session: ${messages.length} messages from .helix/history.json\n`);
+    }
+    if (dropped > 0) {
+      output.write(`${style.warning(`${SYMBOL.warning} Dropped ${dropped} invalid history message(s)${reason ? `: ${reason}` : ''}. Run /reset if issues persist.`)}\n`);
+      saveAgentHistory(config.cwd, agent, session);
+    }
   }
 
   showWelcome(config.cwd, modelOverride ? runtime.model : '', SLASH_COMMANDS.map((c) => c.name).join(' '));
@@ -335,6 +343,7 @@ async function handleInputLine(
     compactedHistoryMessages: context.session.compactKeepMessages,
     maxHistoryMessages: context.session.maxHistoryMessages,
     maxToolRounds: context.session.maxToolRounds,
+    contextTokenLimit: context.session.contextTokenLimit,
     contextUsage: context.agent.getContextUsage()
   });
   if (slash.handled) {
@@ -342,6 +351,13 @@ async function handleInputLine(
       context.runtime.model = slash.model;
       context.agent.setActiveModel(slash.model);
       context.session.contextTokenLimit = context.agent.getContextTokenLimit();
+      const limit = context.agent.getContextTokenLimit();
+      const limitLabel = limit >= 1_000_000
+        ? `${(limit / 1_000_000).toFixed(1)}M`
+        : limit >= 1000
+          ? `${(limit / 1000).toFixed(1)}k`
+          : String(limit);
+      slash.output = `${slash.output}\nContext limit: ${limitLabel} tokens`;
     }
     if (slash.cycleMode) {
       currentMode = cycleMode(currentMode);
@@ -350,9 +366,21 @@ async function handleInputLine(
       savePermissionMode(context.config.cwd, currentMode).catch(() => {});
     }
     if (slash.compact) {
-      context.agent.compactHistory(slash.compactKeep ?? context.session.compactKeepMessages);
+      const before = context.agent.historySize();
+      if (slash.compactByTokens) {
+        context.agent.compactHistoryByTokens(slash.compactByTokens);
+        const after = context.agent.historySize();
+        const est = context.agent.estimateHistoryTokens();
+        output.write(`Compacting history to ~${slash.compactByTokens >= 1000 ? `${(slash.compactByTokens / 1000).toFixed(1)}k` : slash.compactByTokens} tokens: ${before} → ${after} messages (~${est >= 1000 ? `${(est / 1000).toFixed(1)}k` : est} tokens).\n`);
+      } else {
+        context.agent.compactHistory(slash.compactKeep ?? context.session.compactKeepMessages);
+        const after = context.agent.historySize();
+        output.write(`Session history compacted from ${before} to ${after} messages.\n`);
+      }
+      saveAgentHistory(context.config.cwd, context.agent, context.session);
+    } else if (slash.output) {
+      output.write(`${slash.output}\n`);
     }
-    output.write(`${slash.output}\n`);
     if (slash.historySave) {
       saveAgentHistory(context.config.cwd, context.agent, context.session);
     }

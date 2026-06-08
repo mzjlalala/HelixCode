@@ -124,17 +124,17 @@ describe('slash commands', () => {  it('completes slash commands by prefix with 
     }
   });
 
-  it('recognizes compact as a history-compacting command', () => {
+  it('recognizes compact as token-aware by default', () => {
     const result = handleSlashCommand('/compact', {
       historyMessages: 42,
-      compactedHistoryMessages: 20
+      contextTokenLimit: 128_000
     });
 
     expect(result.handled).toBe(true);
     if (result.handled) {
       expect(result.compact).toBe(true);
-      expect(result.compactKeep).toBe(20);
-      expect(result.output).toBe('Session history compacted from 42 to 20 messages.');
+      expect(result.compactByTokens).toBe(64_000);
+      expect(result.output).toContain('64.0k');
     }
   });
 
@@ -150,15 +150,15 @@ describe('slash commands', () => {  it('completes slash commands by prefix with 
     }
   });
 
-  it('rejects invalid /compact N values and uses default', () => {
+  it('treats invalid /compact N as token mode', () => {
     const result = handleSlashCommand('/compact 0', {
       historyMessages: 50,
-      compactedHistoryMessages: 20
+      contextTokenLimit: 100_000
     });
 
     expect(result.handled).toBe(true);
     if (result.handled) {
-      expect(result.compactKeep).toBe(20);
+      expect(result.compactByTokens).toBe(50_000);
     }
   });
 

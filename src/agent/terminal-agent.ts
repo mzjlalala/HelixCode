@@ -18,7 +18,8 @@ import {
   DEFAULT_MAX_HISTORY_MESSAGES,
   DEFAULT_MAX_TOOL_ROUNDS
 } from '../core/constants.js';
-import { buildContextUsage, type ContextUsage } from '../core/token-estimate.js';
+import { compactMessagesByTokenBudget } from '../core/history-compact.js';
+import { buildContextUsage, estimateMessagesTokens, type ContextUsage } from '../core/token-estimate.js';
 import type { TokenUsage } from '../llm/types.js';
 import type { ToolActivityEvent, ToolCallStreamEvent } from './stream-events.js';
 
@@ -225,12 +226,26 @@ export class TerminalAgent {
     const keep = Math.max(0, Math.floor(keepMessages));
     if (this.history.length > keep) {
       this.history.splice(0, this.history.length - keep);
-      // 移除开头孤立的 tool 消息（其父级 tool_calls 已被裁剪）
       while (this.history.length > 0 && this.history[0]?.role === 'tool') {
         this.history.shift();
       }
     }
     return this.history.length;
+  }
+
+  /**
+   * 按 token 预算压缩历史（从尾部保留，直到估算 token ≤ targetTokens）。
+   * 用于 context 接近上限时的 /compact。
+   */
+  compactHistoryByTokens(targetTokens: number): number {
+    const { messages } = compactMessagesByTokenBudget(this.history, targetTokens);
+    this.history.splice(0, this.history.length, ...messages);
+    return this.history.length;
+  }
+
+  /** 估算当前内存历史的 token 数 */
+  estimateHistoryTokens(): number {
+    return estimateMessagesTokens(this.history);
   }
 
   /** 从持久化存储恢复历史；system 消息由每轮动态生成，不加载。 */

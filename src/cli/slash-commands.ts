@@ -26,7 +26,7 @@ export const SLASH_COMMANDS: SlashCommandDefinition[] = [
   { name: '/undo', description: 'Undo the last file modification' },
   { name: '/history', description: 'Show history size, search, or save', usage: '/history [search <keyword>|save]' },
   { name: '/plan', description: 'Show current session plan' },
-  { name: '/compact', description: 'Compact session history', usage: '/compact [keep]' },
+  { name: '/compact', description: 'Compact session history (token-aware by default)', usage: '/compact [N|Nk|auto]' },
   { name: '/tools', description: 'Show available agent tools' },
   { name: '/reset', description: 'Clear session context' },
   { name: '/clear', description: 'Clear the screen and session context' },
@@ -75,6 +75,8 @@ export type SlashCommandResult =
       reset?: boolean;
       compact?: boolean;
       compactKeep?: number;
+      /** 按 token 预算压缩（/compact 无参数或 Nk） */
+      compactByTokens?: number;
       model?: string;
       cycleMode?: true;
       historySave?: true;
@@ -96,6 +98,8 @@ export interface SlashCommandContext {
   compactedHistoryMessages?: number;
   maxHistoryMessages?: number;
   maxToolRounds?: number;
+  /** 当前模型 context 上限（token） */
+  contextTokenLimit?: number;
   /** 当前会话上下文 token 估算（由 Agent.getContextUsage 提供） */
   contextUsage?: ContextUsage;
 }
@@ -171,18 +175,33 @@ export function handleSlashCommand(
     };
   }
 
-  // /compact [keep]：压缩历史，保留最近 keep 条（默认来自 session 配置）
+  // /compact [N|Nk|auto]：默认按 token 预算压缩；N 为保留条数，Nk 为 token 上限
   if (command === '/compact' || command.startsWith('/compact ')) {
     const before = context.historyMessages ?? 0;
-    const requested = parseInt(command === '/compact' ? '' : command.slice('/compact '.length).trim(), 10);
-    const keep = Number.isFinite(requested) && requested > 0 ? requested : (context.compactedHistoryMessages ?? 20);
-    const after = Math.min(before, keep);
+    const arg = command === '/compact' ? '' : command.slice('/compact '.length).trim();
+    const parsed = parseCompactArg(arg);
+
+    if (parsed.mode === 'tokens') {
+      const target = parsed.targetTokens > 0
+        ? parsed.targetTokens
+        : Math.floor((context.contextTokenLimit ?? 128_000) * 0.5);
+      return {
+        handled: true,
+        exit: false,
+        clear: false,
+        compact: true,
+        compactByTokens: target,
+        output: `Compacting history to ~${formatTokenCount(target)} tokens (from ${before} messages)…`
+      };
+    }
+
+    const after = Math.min(before, parsed.keep);
     return {
       handled: true,
       exit: false,
       clear: false,
       compact: true,
-      compactKeep: keep,
+      compactKeep: parsed.keep,
       output: `Session history compacted from ${before} to ${after} messages.`
     };
   }
@@ -359,4 +378,33 @@ export function formatDoctor(context: SlashCommandContext): string {
     `plan items: ${context.planItems?.length ?? 0}`,
     ...(context.contextUsage ? formatContextUsageLines(context.contextUsage) : [])
   ].join('\n');
+}
+
+/** 解析 /compact 参数：无参或 auto → token 模式；Nk / 大数字 → token；小整数 → 保留条数 */
+export function parseCompactArg(arg: string): { mode: 'messages'; keep: number } | { mode: 'tokens'; targetTokens: number } {
+  const trimmed = arg.trim().toLowerCase();
+  if (!trimmed || trimmed === 'auto') {
+    return { mode: 'tokens', targetTokens: 0 };
+  }
+
+  const kMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*k$/);
+  if (kMatch) {
+    return { mode: 'tokens', targetTokens: Math.floor(parseFloat(kMatch[1]!) * 1000) };
+  }
+
+  const num = parseInt(trimmed, 10);
+  if (Number.isFinite(num) && num > 300) {
+    return { mode: 'tokens', targetTokens: num };
+  }
+  if (Number.isFinite(num) && num > 0) {
+    return { mode: 'messages', keep: num };
+  }
+
+  return { mode: 'tokens', targetTokens: 0 };
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
 }
